@@ -96,6 +96,9 @@ gleam test  # Run the tests
 - [x] QR Code Structure
 - [x] Draw Matrix
 - [x] Add Snapshot Testing
+- [ ] Add more Snapshot testing
+- [ ] Add Lustre example
+- [ ] Refactor to make even more use of bitarrays
 
 ## References
 [Thonky's QR Code Tutorial](https://www.thonky.com/qr-code-tutorial)
@@ -105,3 +108,5 @@ gleam test  # Run the tests
 [SiliconJungles elixir qr code library](https://github.com/SiliconJungles/eqrcode)
 
 [Nayuki QR Code Step by Step](https://www.nayuki.io/page/creating-a-qr-code-step-by-step)
+
+[Gears BitArray Blog Post](https://gearsco.de/blog/bit-array-syntax/)
