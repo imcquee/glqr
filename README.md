@@ -35,8 +35,8 @@ pub fn main() -> Nil {
     |> qr.generate()
 
   code
-  |> qr.to_printable() // YOU CANT USE ECHO AS IT PRESERVES THE NEWLINE
-  |> io.println()
+  |> qr.to_printable()
+  |> io.println() // YOU CANT USE ECHO AS IT PRESERVES THE NEWLINE
 }
 ```
 
