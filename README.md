@@ -85,3 +85,6 @@ gleam test  # Run the tests
 - [x] QR Code Structure
 - [x] Draw Matrix
 - [x] Add Snapshot Testing
+
+## References
+[Thonky's QR Code Tutorial](https://www.thonky.com/qr-code-tutorial)
