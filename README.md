@@ -99,6 +99,9 @@ gleam test  # Run the tests
 
 ## References
 [Thonky's QR Code Tutorial](https://www.thonky.com/qr-code-tutorial)
+
 [IODevs elixir qr code library](https://github.com/iodevs/qr_code)
+
 [SiliconJungles elixir qr code library](https://github.com/SiliconJungles/eqrcode)
+
 [Nayuki QR Code Step by Step](https://www.nayuki.io/page/creating-a-qr-code-step-by-step)
