@@ -70,6 +70,37 @@ pub fn main() -> Nil {
 }
 ```
 
+## Simple Lustre Example
+```gleam
+import gleam/int
+import glqr
+import lustre
+import lustre/attribute
+import lustre/element
+
+fn render_qr(value: String, size: Int) {
+  let assert Ok(matrix) =
+    glqr.new(value)
+    |> glqr.generate()
+
+  let svg = glqr.to_svg(matrix)
+
+  lustre.element(element.unsafe_raw_html(
+    "",
+    "div",
+    [attribute.style("max-width", int.to_string(size) <> "px")],
+    svg,
+  ))
+}
+
+pub fn main() {
+  let app = render_qr("https://github.com/lustre-labs/lustre", 150)
+  let assert Ok(_) = lustre.start(app, "#app", Nil)
+
+  Nil
+}
+````
+
 Further documentation can be found at <https://hexdocs.pm/glqr>.
 
 ## Development
@@ -97,7 +128,7 @@ gleam test  # Run the tests
 - [x] Draw Matrix
 - [x] Add Snapshot Testing
 - [ ] Add more Snapshot testing
-- [ ] Add Lustre example
+- [x] Add Lustre example
 - [ ] Refactor to make even more use of bitarrays
 
 ## References
