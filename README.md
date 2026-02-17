@@ -23,6 +23,17 @@ pub fn main() -> Nil {
 ```
 
 ## Config Options
+
+- Error Correction Level
+    - L (Low, 7% of damage to image be restored)
+    - M (Medium, 15% of damage to image be restored)
+    - Q (Quartile, 25% of damage to image be restored)
+    - H (High, 30% of damage to image be restored)
+
+- Minimum Version (1-40, default is 1)
+    - Version 1: 21x21 matrix
+    - Version 40: 177x177 matrix
+
 ```gleam
 import gleam/io
 import glqr as qr
