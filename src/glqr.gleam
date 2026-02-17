@@ -41,19 +41,6 @@ pub type ErrorCorrectionLevel {
   H
 }
 
-/// Information for error correction table 
-/// https://www.thonky.com/qr-code-tutorial/error-correction-table
-pub type ECInfo {
-  ECInfo(
-    data_codewords: Int,
-    ec_codewords_per_block: Int,
-    group1_blocks: Int,
-    group1_block_size: Int,
-    group2_blocks: Int,
-    group2_block_size: Int,
-  )
-}
-
 /// QR code version (1-40) which determines the size of the QR code and the amount of data it can hold
 /// Version 1 is 21x21
 /// Version 40 is 177x177
@@ -66,6 +53,17 @@ pub opaque type Version {
 pub type Module {
   Dark
   Light
+}
+
+type ECInfo {
+  ECInfo(
+    data_codewords: Int,
+    ec_codewords_per_block: Int,
+    group1_blocks: Int,
+    group1_block_size: Int,
+    group2_blocks: Int,
+    group2_block_size: Int,
+  )
 }
 
 type EncodingMode {
@@ -120,6 +118,7 @@ pub fn generate(config: QrConfig) -> Result(List(List(Module)), GenerateError) {
       let min = config.min_version
 
       use <- guard_version(min)
+      // https://www.thonky.com/qr-code-tutorial/data-encoding (Step 2) Determine smallest version
       use version <- result.try(find_version(
         value,
         size,
@@ -142,6 +141,7 @@ pub fn generate(config: QrConfig) -> Result(List(List(Module)), GenerateError) {
         required_bits - encoding_bits_with_terminator,
       ))
 
+      // https://www.thonky.com/qr-code-tutorial/data-encoding (Step 3-4) Full encoding + padding
       let data_bits = <<
         mode_indicator:bits,
         char_count_indicator:bits,
@@ -153,9 +153,13 @@ pub fn generate(config: QrConfig) -> Result(List(List(Module)), GenerateError) {
 
       let data_bytes = bits_to_bytes(data_bits)
       let ec_info = ec_info(version, level)
+      // https://www.thonky.com/qr-code-tutorial/error-correction-coding
       let #(data_blocks, ec_blocks) = split_into_blocks(data_bytes, ec_info)
+      // https://www.thonky.com/qr-code-tutorial/structure-final-message (Step 2-4)
       let interleaved = interleave_blocks(data_blocks, ec_blocks, version)
       let dimensions = version_size(version)
+      // https://www.thonky.com/qr-code-tutorial/module-placement-matrix
+      // https://www.thonky.com/qr-code-tutorial/data-masking 
       let matrix =
         matrix_new(dimensions)
         |> place_function_patterns(version)
