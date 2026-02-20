@@ -782,9 +782,17 @@ fn gf_multiply(a: Int, b: Int) -> Int {
 }
 
 fn build_generator_poly(ec_count: Int) -> List(Int) {
-  int.range(from: 0, to: ec_count, with: [1], run: fn(gen, i) {
-    gf_poly_multiply(gen, [1, gf_exp(i)])
-  })
+  build_generator_poly_loop(ec_count, [1])
+}
+
+fn build_generator_poly_loop(ec_count: Int, current: List(Int)) -> List(Int) {
+  case ec_count {
+    0 -> current
+    _ -> {
+      let next_gen = gf_poly_multiply(current, [1, gf_exp(ec_count - 1)])
+      build_generator_poly_loop(ec_count - 1, next_gen)
+    }
+  }
 }
 
 fn gf_poly_multiply(p1: List(Int), p2: List(Int)) -> List(Int) {
