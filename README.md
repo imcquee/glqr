@@ -4,7 +4,7 @@
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/glqr/)
 
 ```sh
-gleam add glqr@1
+gleam add glqr
 ```
 ## Display QR Code
 ```gleam
@@ -129,7 +129,8 @@ gleam test  # Run the tests
 - [x] Add Snapshot Testing
 - [ ] Add more Snapshot testing
 - [x] Add Lustre example
-- [ ] Refactor to make even more use of bitarrays
+- [x] Use matrix with custom QrCode type with bitarray instead of list of lists
+- [x] Add to_bits feature
 
 ## References
 [Thonky's QR Code Tutorial](https://www.thonky.com/qr-code-tutorial)

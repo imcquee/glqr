@@ -49,10 +49,10 @@ pub opaque type Version {
   Version(Int)
 }
 
-/// A module in the QR code matrix, which can be either dark or light
-pub type Module {
-  Dark
-  Light
+/// Generated QR code containing the module data
+/// Use `to_printable`, `to_svg`, or `to_bits` to convert to different formats
+pub opaque type Qr {
+  Qr(size: Int, rows: List(List(Bool)))
 }
 
 type ECInfo {
@@ -106,26 +106,20 @@ pub fn min_version(config: QrConfig, version: Int) -> QrConfig {
   QrConfig(..config, min_version: version)
 }
 
-/// Generate a QR code matrix based on the provided config
-/// This can then be piped into `to_printable` or `to_svg` to get a visual representation of the QR code
-pub fn generate(config: QrConfig) -> Result(List(List(Module)), GenerateError) {
+/// Generate a QR code based on the provided config
+/// Returns a Qr that can be converted to different formats using `to_printable`, `to_svg`, or `to_bits`
+pub fn generate(config: QrConfig) -> Result(Qr, GenerateError) {
   let value = config.value
   case value {
     "" -> Error(EmptyValue("Provided value cannot be empty"))
     _ -> {
-      let #(mode, size) = detect(value)
+      let #(mode, size) = detect(bit_array.from_string(value), Numeric, 0)
       let level = config.error_correction
       let min = config.min_version
 
       use <- guard_version(min)
       // https://www.thonky.com/qr-code-tutorial/data-encoding (Step 2) Determine smallest version
-      use version <- result.try(find_version(
-        value,
-        size,
-        mode,
-        Version(min),
-        level,
-      ))
+      use version <- result.try(find_version(size, mode, min, level))
 
       use enc <- result.try(encode(value, mode))
       let mode_indicator = mode_indicator(mode)
@@ -166,69 +160,84 @@ pub fn generate(config: QrConfig) -> Result(List(List(Module)), GenerateError) {
         |> reserve_format_areas()
         |> reserve_version_areas(version)
         |> place_data_bits(interleaved)
-        |> find_best_mask(version, level)
 
-      Ok(matrix_to_rows(matrix))
+      Ok(find_best_mask_and_render(matrix, version, level))
     }
   }
 }
 
 fn guard_version(
   version: Int,
-  next: fn() -> Result(List(List(Module)), GenerateError),
-) -> Result(List(List(Module)), GenerateError) {
+  next: fn() -> Result(Qr, GenerateError),
+) -> Result(Qr, GenerateError) {
   case version {
     v if 1 <= v && v <= 40 -> next()
     _ -> Error(InvalidVersion(version))
   }
 }
 
-/// Convert the QR code matrix into a printable string representation using Unicode block characters
+/// Convert the QR code into a printable string representation using Unicode block characters
 /// You must use io.println to print this rather than echo as echo will preserve the newlines
-pub fn to_printable(matrix: List(List(Module))) -> String {
-  let quiet_zone = 4
-  let padded = pad_matrix(matrix, quiet_zone)
-  let pairs = pair_rows(padded)
-  let data_rows =
-    list.map(pairs, fn(pair) {
-      let #(top, bottom) = pair
-      list.map2(top, bottom, fn(t, b) {
-        case t, b {
-          Dark, Dark -> "█"
-          Dark, Light -> "▀"
-          Light, Dark -> "▄"
-          Light, Light -> " "
-        }
-      })
-      |> string.join("")
-    })
-  string.join(data_rows, "\n")
-}
-
-/// Convert the QR code matrix into an SVG string representation
-pub fn to_svg(matrix: List(List(Module))) -> String {
-  let size = list.length(matrix)
+pub fn to_printable(qr: Qr) -> String {
+  let Qr(size, rows) = qr
   let quiet_zone = 4
   let total = size + quiet_zone * 2
-  let rects =
-    matrix
-    |> list.index_map(fn(row, r) {
-      row
-      |> list.index_map(fn(module, c) {
-        case module {
-          Dark ->
-            "<rect x=\""
-            <> int.to_string(c + quiet_zone)
-            <> "\" y=\""
-            <> int.to_string(r + quiet_zone)
-            <> "\" width=\"1\" height=\"1\"/>"
-          Light -> ""
-        }
-      })
-      |> list.filter(fn(s) { s != "" })
-    })
-    |> list.flatten
-    |> string.join("\n")
+  // Build rows with quiet zone padding
+  let quiet_row = string.repeat(" ", total)
+  let quiet_rows = string.repeat(quiet_row <> "\n", quiet_zone / 2)
+  let side_padding = string.repeat(" ", quiet_zone)
+  let data_rows = printable_row_pairs(rows, side_padding, [])
+  // Trim trailing newline to avoid extra empty line at end
+  let result = quiet_rows <> string.join(data_rows, "\n") <> "\n" <> quiet_rows
+  string.drop_end(result, 1)
+}
+
+fn printable_row_pairs(
+  rows: List(List(Bool)),
+  padding: String,
+  acc: List(String),
+) -> List(String) {
+  case rows {
+    [top, bottom, ..rest] -> {
+      let row_str = padding <> render_row_pair(top, bottom, "") <> padding
+      printable_row_pairs(rest, padding, [row_str, ..acc])
+    }
+    [top] -> {
+      let row_str = padding <> render_row_pair(top, [], "") <> padding
+      list.reverse([row_str, ..acc])
+    }
+    [] -> list.reverse(acc)
+  }
+}
+
+fn render_row_pair(top: List(Bool), bottom: List(Bool), acc: String) -> String {
+  case top, bottom {
+    [t, ..top_rest], [b, ..bottom_rest] -> {
+      let char = case t, b {
+        True, True -> "█"
+        True, False -> "▀"
+        False, True -> "▄"
+        False, False -> " "
+      }
+      render_row_pair(top_rest, bottom_rest, acc <> char)
+    }
+    [t, ..top_rest], [] -> {
+      let char = case t {
+        True -> "▀"
+        False -> " "
+      }
+      render_row_pair(top_rest, [], acc <> char)
+    }
+    [], _ -> acc
+  }
+}
+
+/// Convert the QR code into an SVG string representation
+pub fn to_svg(qr: Qr) -> String {
+  let Qr(size, rows) = qr
+  let quiet_zone = 4
+  let total = size + quiet_zone * 2
+  let rects = svg_rects_from_rows(rows, quiet_zone, 0, [])
   let total_str = int.to_string(total)
   "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 "
   <> total_str
@@ -239,117 +248,165 @@ pub fn to_svg(matrix: List(List(Module))) -> String {
   <> "\" height=\""
   <> total_str
   <> "\" fill=\"white\"/>\n<g fill=\"black\">\n"
-  <> rects
+  <> string.join(rects, "\n")
   <> "\n</g>\n</svg>"
 }
 
-fn detect(candidate: String) -> #(EncodingMode, Int) {
-  candidate
-  |> string.to_graphemes
-  |> list.fold(from: #(Numeric, 0), with: fn(acc, char) {
-    let #(mode, count) = acc
-    case char {
-      "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> #(
-        mode,
-        count + 1,
-      )
-      "A"
-      | "B"
-      | "C"
-      | "D"
-      | "E"
-      | "F"
-      | "G"
-      | "H"
-      | "I"
-      | "J"
-      | "K"
-      | "L"
-      | "M"
-      | "N"
-      | "O"
-      | "P"
-      | "Q"
-      | "R"
-      | "S"
-      | "T"
-      | "U"
-      | "V"
-      | "W"
-      | "X"
-      | "Y"
-      | "Z"
-      | " "
-      | "$"
-      | "%"
-      | "*"
-      | "+"
-      | "-"
-      | "."
-      | "/"
-      | ":" -> {
-        case mode {
-          UTF8 -> #(UTF8, count + 1)
-          _ -> #(Alphanumeric, count + 1)
+/// Convert the QR code into a tuple of (size, bits) where size is the width/height
+/// Each bit represents a module: 1 = Dark, 0 = Light
+/// To access module at (row, col): bit index = row * size + col
+pub fn to_bits(qr: Qr) -> #(Int, BitArray) {
+  let Qr(size, rows) = qr
+  let bits =
+    list.fold(rows, <<>>, fn(acc, row) {
+      list.fold(row, acc, fn(bits, cell) {
+        case cell {
+          True -> <<bits:bits, 1:1>>
+          False -> <<bits:bits, 0:1>>
         }
-      }
-      _ -> #(UTF8, count + 1)
+      })
+    })
+  #(size, bits)
+}
+
+fn svg_rects_from_rows(
+  rows: List(List(Bool)),
+  quiet_zone: Int,
+  row_idx: Int,
+  acc: List(String),
+) -> List(String) {
+  case rows {
+    [row, ..rest] -> {
+      let row_rects = svg_row_rects(row, quiet_zone, row_idx, 0, acc)
+      svg_rects_from_rows(rest, quiet_zone, row_idx + 1, row_rects)
     }
-  })
+    [] -> list.reverse(acc)
+  }
+}
+
+fn svg_row_rects(
+  row: List(Bool),
+  quiet_zone: Int,
+  row_idx: Int,
+  col_idx: Int,
+  acc: List(String),
+) -> List(String) {
+  case row {
+    [True, ..rest] -> {
+      let rect =
+        "<rect x=\""
+        <> int.to_string(col_idx + quiet_zone)
+        <> "\" y=\""
+        <> int.to_string(row_idx + quiet_zone)
+        <> "\" width=\"1\" height=\"1\"/>"
+      svg_row_rects(rest, quiet_zone, row_idx, col_idx + 1, [rect, ..acc])
+    }
+    [False, ..rest] ->
+      svg_row_rects(rest, quiet_zone, row_idx, col_idx + 1, acc)
+    [] -> acc
+  }
+}
+
+fn detect(
+  bytes: BitArray,
+  mode: EncodingMode,
+  count: Int,
+) -> #(EncodingMode, Int) {
+  case bytes {
+    <<byte, rest:bytes>> -> {
+      let #(new_mode, new_count) = case byte {
+        // 0-9
+        b if b >= 48 && b <= 57 -> #(mode, count + 1)
+        // A-Z
+        b if b >= 65 && b <= 90 -> #(
+          case mode {
+            UTF8 -> UTF8
+            _ -> Alphanumeric
+          },
+          count + 1,
+        )
+        // Space, $, %, *, +, -, ., /, :
+        32 | 36 | 37 | 42 | 43 | 45 | 46 | 47 | 58 -> #(
+          case mode {
+            UTF8 -> UTF8
+            _ -> Alphanumeric
+          },
+          count + 1,
+        )
+        // Anything else is UTF8
+        _ -> #(UTF8, count + 1)
+      }
+      detect(rest, new_mode, new_count)
+    }
+    _ -> #(mode, count)
+  }
 }
 
 fn encode(value: String, mode: EncodingMode) -> Result(BitArray, GenerateError) {
-  let graphemes = string.to_graphemes(value)
+  let bytes = bit_array.from_string(value)
   case mode {
-    Numeric ->
-      graphemes
-      |> list.sized_chunk(3)
-      |> list.try_map(fn(chunk) {
-        let number = int.parse(string.concat(chunk))
-        case number {
-          Ok(num) ->
-            case chunk {
-              [_, _, _] -> Ok(<<num:size(10)>>)
-              [_, _] -> Ok(<<num:size(7)>>)
-              [_] -> Ok(<<num:size(4)>>)
-              _ -> Ok(<<>>)
-            }
-          Error(_) ->
-            Error(InvalidNumericEncoding(
-              "Failed to parse a numeric chunk, please report this as a bug with the input value: "
-              <> value,
-            ))
-        }
-      })
-      |> result.map(bit_array.concat)
-    Alphanumeric ->
-      graphemes
-      |> list.sized_chunk(2)
-      |> list.try_map(fn(chunk) {
-        case chunk {
-          [first, second] ->
-            case alpha_value(first), alpha_value(second) {
-              Ok(v1), Ok(v2) -> Ok(<<{ v1 * 45 + v2 }:size(11)>>)
-              _, _ ->
-                Error(InvalidAlphanumericEncoding(
-                  "Failed to parse an alphanumeric chunk, please report this as a bug with the input value: "
-                  <> value,
-                ))
-            }
-          [single] ->
-            case alpha_value(single) {
-              Ok(v) -> Ok(<<v:size(6)>>)
-              Error(_) ->
-                Error(InvalidAlphanumericEncoding(
-                  "Failed to parse an alphanumeric chunk, please report this as a bug with the input value: "
-                  <> value,
-                ))
-            }
-          _ -> Ok(<<>>)
-        }
-      })
-      |> result.map(bit_array.concat)
-    UTF8 -> Ok(bit_array.from_string(value))
+    Numeric -> encode_numeric(bytes, <<>>)
+    Alphanumeric -> encode_alphanumeric(bytes, <<>>)
+    UTF8 -> Ok(bytes)
+  }
+}
+
+fn encode_numeric(
+  bytes: BitArray,
+  acc: BitArray,
+) -> Result(BitArray, GenerateError) {
+  case bytes {
+    <<d1, d2, d3, rest:bytes>> -> {
+      let num = { d1 - 48 } * 100 + { d2 - 48 } * 10 + { d3 - 48 }
+      encode_numeric(rest, <<acc:bits, num:size(10)>>)
+    }
+    <<d1, d2>> -> {
+      let num = { d1 - 48 } * 10 + { d2 - 48 }
+      Ok(<<acc:bits, num:size(7)>>)
+    }
+    <<d1>> -> {
+      let num = d1 - 48
+      Ok(<<acc:bits, num:size(4)>>)
+    }
+    <<>> -> Ok(acc)
+    _ -> Error(InvalidNumericEncoding("Invalid numeric encoding"))
+  }
+}
+
+fn encode_alphanumeric(
+  bytes: BitArray,
+  acc: BitArray,
+) -> Result(BitArray, GenerateError) {
+  case bytes {
+    <<b1, b2, rest:bytes>> -> {
+      let v1 = alpha_value_byte(b1)
+      let v2 = alpha_value_byte(b2)
+      let combined = v1 * 45 + v2
+      encode_alphanumeric(rest, <<acc:bits, combined:size(11)>>)
+    }
+    <<b1>> -> {
+      let v = alpha_value_byte(b1)
+      Ok(<<acc:bits, v:size(6)>>)
+    }
+    <<>> -> Ok(acc)
+    _ -> Error(InvalidAlphanumericEncoding("Invalid alphanumeric encoding"))
+  }
+}
+
+fn alpha_value_byte(byte: Int) -> Int {
+  case byte {
+    b if b >= 48 && b <= 57 -> b - 48
+    b if b >= 65 && b <= 90 -> b - 65 + 10
+    32 -> 36
+    36 -> 37
+    37 -> 38
+    42 -> 39
+    43 -> 40
+    45 -> 41
+    46 -> 42
+    47 -> 43
+    58 -> 44
+    _ -> 0
   }
 }
 
@@ -393,101 +450,626 @@ fn character_count_indicator(
   <<count:size(bits)>>
 }
 
-fn alpha_value(char: String) -> Result(Int, Nil) {
-  case char {
-    "0" -> Ok(0)
-    "1" -> Ok(1)
-    "2" -> Ok(2)
-    "3" -> Ok(3)
-    "4" -> Ok(4)
-    "5" -> Ok(5)
-    "6" -> Ok(6)
-    "7" -> Ok(7)
-    "8" -> Ok(8)
-    "9" -> Ok(9)
-    "A" -> Ok(10)
-    "B" -> Ok(11)
-    "C" -> Ok(12)
-    "D" -> Ok(13)
-    "E" -> Ok(14)
-    "F" -> Ok(15)
-    "G" -> Ok(16)
-    "H" -> Ok(17)
-    "I" -> Ok(18)
-    "J" -> Ok(19)
-    "K" -> Ok(20)
-    "L" -> Ok(21)
-    "M" -> Ok(22)
-    "N" -> Ok(23)
-    "O" -> Ok(24)
-    "P" -> Ok(25)
-    "Q" -> Ok(26)
-    "R" -> Ok(27)
-    "S" -> Ok(28)
-    "T" -> Ok(29)
-    "U" -> Ok(30)
-    "V" -> Ok(31)
-    "W" -> Ok(32)
-    "X" -> Ok(33)
-    "Y" -> Ok(34)
-    "Z" -> Ok(35)
-    " " -> Ok(36)
-    "$" -> Ok(37)
-    "%" -> Ok(38)
-    "*" -> Ok(39)
-    "+" -> Ok(40)
-    "-" -> Ok(41)
-    "." -> Ok(42)
-    "/" -> Ok(43)
-    ":" -> Ok(44)
-    _ -> Error(Nil)
-  }
-}
-
 fn required_bits(version: Version, level: ErrorCorrectionLevel) -> Int {
   let ec_info = ec_info(version, level)
   ec_info.data_codewords * 8
 }
 
 fn find_version(
-  value: String,
   count: Int,
   mode: EncodingMode,
-  min_version: Version,
+  min_v: Int,
   level: ErrorCorrectionLevel,
 ) -> Result(Version, GenerateError) {
-  let Version(v) = min_version
-  find_version_loop(value, count, mode, v, level)
+  let version_result = case mode {
+    Numeric -> find_version_numeric(count, level)
+    Alphanumeric -> find_version_alphanumeric(count, level)
+    UTF8 -> find_version_utf8(count, level)
+  }
+  // Apply min_version constraint
+  case version_result {
+    Ok(Version(v)) if v < min_v -> Ok(Version(min_v))
+    result -> result
+  }
 }
 
-fn find_version_loop(
-  value: String,
+fn find_version_numeric(
   count: Int,
-  mode: EncodingMode,
-  v: Int,
   level: ErrorCorrectionLevel,
 ) -> Result(Version, GenerateError) {
-  case v > 40 {
-    True -> {
-      let max_capacity = case mode {
-        Numeric -> 7089
-        Alphanumeric -> 4296
-        UTF8 -> 2953
+  case level {
+    L ->
+      case count {
+        c if c <= 41 -> Ok(Version(1))
+        c if c <= 77 -> Ok(Version(2))
+        c if c <= 127 -> Ok(Version(3))
+        c if c <= 187 -> Ok(Version(4))
+        c if c <= 255 -> Ok(Version(5))
+        c if c <= 322 -> Ok(Version(6))
+        c if c <= 370 -> Ok(Version(7))
+        c if c <= 461 -> Ok(Version(8))
+        c if c <= 552 -> Ok(Version(9))
+        c if c <= 652 -> Ok(Version(10))
+        c if c <= 772 -> Ok(Version(11))
+        c if c <= 883 -> Ok(Version(12))
+        c if c <= 1022 -> Ok(Version(13))
+        c if c <= 1101 -> Ok(Version(14))
+        c if c <= 1250 -> Ok(Version(15))
+        c if c <= 1408 -> Ok(Version(16))
+        c if c <= 1548 -> Ok(Version(17))
+        c if c <= 1725 -> Ok(Version(18))
+        c if c <= 1903 -> Ok(Version(19))
+        c if c <= 2061 -> Ok(Version(20))
+        c if c <= 2232 -> Ok(Version(21))
+        c if c <= 2409 -> Ok(Version(22))
+        c if c <= 2620 -> Ok(Version(23))
+        c if c <= 2812 -> Ok(Version(24))
+        c if c <= 3057 -> Ok(Version(25))
+        c if c <= 3283 -> Ok(Version(26))
+        c if c <= 3517 -> Ok(Version(27))
+        c if c <= 3669 -> Ok(Version(28))
+        c if c <= 3909 -> Ok(Version(29))
+        c if c <= 4158 -> Ok(Version(30))
+        c if c <= 4417 -> Ok(Version(31))
+        c if c <= 4686 -> Ok(Version(32))
+        c if c <= 4965 -> Ok(Version(33))
+        c if c <= 5253 -> Ok(Version(34))
+        c if c <= 5529 -> Ok(Version(35))
+        c if c <= 5836 -> Ok(Version(36))
+        c if c <= 6153 -> Ok(Version(37))
+        c if c <= 6479 -> Ok(Version(38))
+        c if c <= 6743 -> Ok(Version(39))
+        c if c <= 7089 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 7089,
+          ))
       }
-      Error(ProvidedValueExceedsCapacity(
-        value_length: count,
-        capacity: max_capacity,
-      ))
-    }
-    False -> {
-      let version = Version(v)
-      let bit_count = data_bit_count(value, count, mode, version)
-      let required_bits = required_bits(version, level)
-      case bit_count <= required_bits {
-        True -> Ok(version)
-        False -> find_version_loop(value, count, mode, v + 1, level)
+    M ->
+      case count {
+        c if c <= 34 -> Ok(Version(1))
+        c if c <= 63 -> Ok(Version(2))
+        c if c <= 101 -> Ok(Version(3))
+        c if c <= 149 -> Ok(Version(4))
+        c if c <= 202 -> Ok(Version(5))
+        c if c <= 255 -> Ok(Version(6))
+        c if c <= 293 -> Ok(Version(7))
+        c if c <= 365 -> Ok(Version(8))
+        c if c <= 432 -> Ok(Version(9))
+        c if c <= 513 -> Ok(Version(10))
+        c if c <= 604 -> Ok(Version(11))
+        c if c <= 691 -> Ok(Version(12))
+        c if c <= 796 -> Ok(Version(13))
+        c if c <= 871 -> Ok(Version(14))
+        c if c <= 991 -> Ok(Version(15))
+        c if c <= 1082 -> Ok(Version(16))
+        c if c <= 1212 -> Ok(Version(17))
+        c if c <= 1346 -> Ok(Version(18))
+        c if c <= 1500 -> Ok(Version(19))
+        c if c <= 1600 -> Ok(Version(20))
+        c if c <= 1708 -> Ok(Version(21))
+        c if c <= 1872 -> Ok(Version(22))
+        c if c <= 2059 -> Ok(Version(23))
+        c if c <= 2188 -> Ok(Version(24))
+        c if c <= 2395 -> Ok(Version(25))
+        c if c <= 2544 -> Ok(Version(26))
+        c if c <= 2701 -> Ok(Version(27))
+        c if c <= 2857 -> Ok(Version(28))
+        c if c <= 3035 -> Ok(Version(29))
+        c if c <= 3289 -> Ok(Version(30))
+        c if c <= 3486 -> Ok(Version(31))
+        c if c <= 3693 -> Ok(Version(32))
+        c if c <= 3909 -> Ok(Version(33))
+        c if c <= 4134 -> Ok(Version(34))
+        c if c <= 4343 -> Ok(Version(35))
+        c if c <= 4588 -> Ok(Version(36))
+        c if c <= 4775 -> Ok(Version(37))
+        c if c <= 5039 -> Ok(Version(38))
+        c if c <= 5313 -> Ok(Version(39))
+        c if c <= 5596 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 5596,
+          ))
       }
-    }
+    Q ->
+      case count {
+        c if c <= 27 -> Ok(Version(1))
+        c if c <= 48 -> Ok(Version(2))
+        c if c <= 77 -> Ok(Version(3))
+        c if c <= 111 -> Ok(Version(4))
+        c if c <= 144 -> Ok(Version(5))
+        c if c <= 178 -> Ok(Version(6))
+        c if c <= 207 -> Ok(Version(7))
+        c if c <= 259 -> Ok(Version(8))
+        c if c <= 312 -> Ok(Version(9))
+        c if c <= 364 -> Ok(Version(10))
+        c if c <= 427 -> Ok(Version(11))
+        c if c <= 489 -> Ok(Version(12))
+        c if c <= 580 -> Ok(Version(13))
+        c if c <= 621 -> Ok(Version(14))
+        c if c <= 703 -> Ok(Version(15))
+        c if c <= 775 -> Ok(Version(16))
+        c if c <= 876 -> Ok(Version(17))
+        c if c <= 948 -> Ok(Version(18))
+        c if c <= 1063 -> Ok(Version(19))
+        c if c <= 1159 -> Ok(Version(20))
+        c if c <= 1224 -> Ok(Version(21))
+        c if c <= 1358 -> Ok(Version(22))
+        c if c <= 1468 -> Ok(Version(23))
+        c if c <= 1588 -> Ok(Version(24))
+        c if c <= 1718 -> Ok(Version(25))
+        c if c <= 1804 -> Ok(Version(26))
+        c if c <= 1933 -> Ok(Version(27))
+        c if c <= 2085 -> Ok(Version(28))
+        c if c <= 2181 -> Ok(Version(29))
+        c if c <= 2358 -> Ok(Version(30))
+        c if c <= 2473 -> Ok(Version(31))
+        c if c <= 2670 -> Ok(Version(32))
+        c if c <= 2805 -> Ok(Version(33))
+        c if c <= 2949 -> Ok(Version(34))
+        c if c <= 3081 -> Ok(Version(35))
+        c if c <= 3244 -> Ok(Version(36))
+        c if c <= 3417 -> Ok(Version(37))
+        c if c <= 3599 -> Ok(Version(38))
+        c if c <= 3791 -> Ok(Version(39))
+        c if c <= 3993 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 3993,
+          ))
+      }
+    H ->
+      case count {
+        c if c <= 17 -> Ok(Version(1))
+        c if c <= 34 -> Ok(Version(2))
+        c if c <= 58 -> Ok(Version(3))
+        c if c <= 82 -> Ok(Version(4))
+        c if c <= 106 -> Ok(Version(5))
+        c if c <= 139 -> Ok(Version(6))
+        c if c <= 154 -> Ok(Version(7))
+        c if c <= 202 -> Ok(Version(8))
+        c if c <= 235 -> Ok(Version(9))
+        c if c <= 288 -> Ok(Version(10))
+        c if c <= 331 -> Ok(Version(11))
+        c if c <= 374 -> Ok(Version(12))
+        c if c <= 427 -> Ok(Version(13))
+        c if c <= 468 -> Ok(Version(14))
+        c if c <= 530 -> Ok(Version(15))
+        c if c <= 602 -> Ok(Version(16))
+        c if c <= 674 -> Ok(Version(17))
+        c if c <= 746 -> Ok(Version(18))
+        c if c <= 813 -> Ok(Version(19))
+        c if c <= 919 -> Ok(Version(20))
+        c if c <= 969 -> Ok(Version(21))
+        c if c <= 1056 -> Ok(Version(22))
+        c if c <= 1108 -> Ok(Version(23))
+        c if c <= 1228 -> Ok(Version(24))
+        c if c <= 1286 -> Ok(Version(25))
+        c if c <= 1425 -> Ok(Version(26))
+        c if c <= 1501 -> Ok(Version(27))
+        c if c <= 1581 -> Ok(Version(28))
+        c if c <= 1677 -> Ok(Version(29))
+        c if c <= 1782 -> Ok(Version(30))
+        c if c <= 1897 -> Ok(Version(31))
+        c if c <= 2022 -> Ok(Version(32))
+        c if c <= 2157 -> Ok(Version(33))
+        c if c <= 2301 -> Ok(Version(34))
+        c if c <= 2361 -> Ok(Version(35))
+        c if c <= 2524 -> Ok(Version(36))
+        c if c <= 2625 -> Ok(Version(37))
+        c if c <= 2735 -> Ok(Version(38))
+        c if c <= 2927 -> Ok(Version(39))
+        c if c <= 3057 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 3057,
+          ))
+      }
+  }
+}
+
+fn find_version_alphanumeric(
+  count: Int,
+  level: ErrorCorrectionLevel,
+) -> Result(Version, GenerateError) {
+  case level {
+    L ->
+      case count {
+        c if c <= 25 -> Ok(Version(1))
+        c if c <= 47 -> Ok(Version(2))
+        c if c <= 77 -> Ok(Version(3))
+        c if c <= 114 -> Ok(Version(4))
+        c if c <= 154 -> Ok(Version(5))
+        c if c <= 195 -> Ok(Version(6))
+        c if c <= 224 -> Ok(Version(7))
+        c if c <= 279 -> Ok(Version(8))
+        c if c <= 335 -> Ok(Version(9))
+        c if c <= 395 -> Ok(Version(10))
+        c if c <= 468 -> Ok(Version(11))
+        c if c <= 535 -> Ok(Version(12))
+        c if c <= 619 -> Ok(Version(13))
+        c if c <= 667 -> Ok(Version(14))
+        c if c <= 758 -> Ok(Version(15))
+        c if c <= 854 -> Ok(Version(16))
+        c if c <= 938 -> Ok(Version(17))
+        c if c <= 1046 -> Ok(Version(18))
+        c if c <= 1153 -> Ok(Version(19))
+        c if c <= 1249 -> Ok(Version(20))
+        c if c <= 1352 -> Ok(Version(21))
+        c if c <= 1460 -> Ok(Version(22))
+        c if c <= 1588 -> Ok(Version(23))
+        c if c <= 1704 -> Ok(Version(24))
+        c if c <= 1853 -> Ok(Version(25))
+        c if c <= 1990 -> Ok(Version(26))
+        c if c <= 2132 -> Ok(Version(27))
+        c if c <= 2223 -> Ok(Version(28))
+        c if c <= 2369 -> Ok(Version(29))
+        c if c <= 2520 -> Ok(Version(30))
+        c if c <= 2677 -> Ok(Version(31))
+        c if c <= 2840 -> Ok(Version(32))
+        c if c <= 3009 -> Ok(Version(33))
+        c if c <= 3183 -> Ok(Version(34))
+        c if c <= 3351 -> Ok(Version(35))
+        c if c <= 3537 -> Ok(Version(36))
+        c if c <= 3729 -> Ok(Version(37))
+        c if c <= 3927 -> Ok(Version(38))
+        c if c <= 4087 -> Ok(Version(39))
+        c if c <= 4296 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 4296,
+          ))
+      }
+    M ->
+      case count {
+        c if c <= 20 -> Ok(Version(1))
+        c if c <= 38 -> Ok(Version(2))
+        c if c <= 61 -> Ok(Version(3))
+        c if c <= 90 -> Ok(Version(4))
+        c if c <= 122 -> Ok(Version(5))
+        c if c <= 154 -> Ok(Version(6))
+        c if c <= 178 -> Ok(Version(7))
+        c if c <= 221 -> Ok(Version(8))
+        c if c <= 262 -> Ok(Version(9))
+        c if c <= 311 -> Ok(Version(10))
+        c if c <= 366 -> Ok(Version(11))
+        c if c <= 419 -> Ok(Version(12))
+        c if c <= 483 -> Ok(Version(13))
+        c if c <= 528 -> Ok(Version(14))
+        c if c <= 600 -> Ok(Version(15))
+        c if c <= 656 -> Ok(Version(16))
+        c if c <= 734 -> Ok(Version(17))
+        c if c <= 816 -> Ok(Version(18))
+        c if c <= 909 -> Ok(Version(19))
+        c if c <= 970 -> Ok(Version(20))
+        c if c <= 1035 -> Ok(Version(21))
+        c if c <= 1134 -> Ok(Version(22))
+        c if c <= 1248 -> Ok(Version(23))
+        c if c <= 1326 -> Ok(Version(24))
+        c if c <= 1451 -> Ok(Version(25))
+        c if c <= 1542 -> Ok(Version(26))
+        c if c <= 1637 -> Ok(Version(27))
+        c if c <= 1732 -> Ok(Version(28))
+        c if c <= 1839 -> Ok(Version(29))
+        c if c <= 1994 -> Ok(Version(30))
+        c if c <= 2113 -> Ok(Version(31))
+        c if c <= 2238 -> Ok(Version(32))
+        c if c <= 2369 -> Ok(Version(33))
+        c if c <= 2506 -> Ok(Version(34))
+        c if c <= 2632 -> Ok(Version(35))
+        c if c <= 2780 -> Ok(Version(36))
+        c if c <= 2894 -> Ok(Version(37))
+        c if c <= 3054 -> Ok(Version(38))
+        c if c <= 3220 -> Ok(Version(39))
+        c if c <= 3391 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 3391,
+          ))
+      }
+    Q ->
+      case count {
+        c if c <= 16 -> Ok(Version(1))
+        c if c <= 29 -> Ok(Version(2))
+        c if c <= 47 -> Ok(Version(3))
+        c if c <= 67 -> Ok(Version(4))
+        c if c <= 87 -> Ok(Version(5))
+        c if c <= 108 -> Ok(Version(6))
+        c if c <= 125 -> Ok(Version(7))
+        c if c <= 157 -> Ok(Version(8))
+        c if c <= 189 -> Ok(Version(9))
+        c if c <= 221 -> Ok(Version(10))
+        c if c <= 259 -> Ok(Version(11))
+        c if c <= 296 -> Ok(Version(12))
+        c if c <= 352 -> Ok(Version(13))
+        c if c <= 376 -> Ok(Version(14))
+        c if c <= 426 -> Ok(Version(15))
+        c if c <= 470 -> Ok(Version(16))
+        c if c <= 531 -> Ok(Version(17))
+        c if c <= 574 -> Ok(Version(18))
+        c if c <= 644 -> Ok(Version(19))
+        c if c <= 702 -> Ok(Version(20))
+        c if c <= 742 -> Ok(Version(21))
+        c if c <= 823 -> Ok(Version(22))
+        c if c <= 890 -> Ok(Version(23))
+        c if c <= 963 -> Ok(Version(24))
+        c if c <= 1041 -> Ok(Version(25))
+        c if c <= 1094 -> Ok(Version(26))
+        c if c <= 1172 -> Ok(Version(27))
+        c if c <= 1263 -> Ok(Version(28))
+        c if c <= 1322 -> Ok(Version(29))
+        c if c <= 1429 -> Ok(Version(30))
+        c if c <= 1499 -> Ok(Version(31))
+        c if c <= 1618 -> Ok(Version(32))
+        c if c <= 1700 -> Ok(Version(33))
+        c if c <= 1787 -> Ok(Version(34))
+        c if c <= 1867 -> Ok(Version(35))
+        c if c <= 1966 -> Ok(Version(36))
+        c if c <= 2071 -> Ok(Version(37))
+        c if c <= 2181 -> Ok(Version(38))
+        c if c <= 2298 -> Ok(Version(39))
+        c if c <= 2420 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 2420,
+          ))
+      }
+    H ->
+      case count {
+        c if c <= 10 -> Ok(Version(1))
+        c if c <= 20 -> Ok(Version(2))
+        c if c <= 35 -> Ok(Version(3))
+        c if c <= 50 -> Ok(Version(4))
+        c if c <= 64 -> Ok(Version(5))
+        c if c <= 84 -> Ok(Version(6))
+        c if c <= 93 -> Ok(Version(7))
+        c if c <= 122 -> Ok(Version(8))
+        c if c <= 143 -> Ok(Version(9))
+        c if c <= 174 -> Ok(Version(10))
+        c if c <= 200 -> Ok(Version(11))
+        c if c <= 227 -> Ok(Version(12))
+        c if c <= 259 -> Ok(Version(13))
+        c if c <= 283 -> Ok(Version(14))
+        c if c <= 321 -> Ok(Version(15))
+        c if c <= 365 -> Ok(Version(16))
+        c if c <= 408 -> Ok(Version(17))
+        c if c <= 452 -> Ok(Version(18))
+        c if c <= 493 -> Ok(Version(19))
+        c if c <= 557 -> Ok(Version(20))
+        c if c <= 587 -> Ok(Version(21))
+        c if c <= 640 -> Ok(Version(22))
+        c if c <= 672 -> Ok(Version(23))
+        c if c <= 744 -> Ok(Version(24))
+        c if c <= 779 -> Ok(Version(25))
+        c if c <= 864 -> Ok(Version(26))
+        c if c <= 910 -> Ok(Version(27))
+        c if c <= 958 -> Ok(Version(28))
+        c if c <= 1016 -> Ok(Version(29))
+        c if c <= 1080 -> Ok(Version(30))
+        c if c <= 1150 -> Ok(Version(31))
+        c if c <= 1226 -> Ok(Version(32))
+        c if c <= 1307 -> Ok(Version(33))
+        c if c <= 1394 -> Ok(Version(34))
+        c if c <= 1431 -> Ok(Version(35))
+        c if c <= 1530 -> Ok(Version(36))
+        c if c <= 1591 -> Ok(Version(37))
+        c if c <= 1658 -> Ok(Version(38))
+        c if c <= 1774 -> Ok(Version(39))
+        c if c <= 1852 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 1852,
+          ))
+      }
+  }
+}
+
+fn find_version_utf8(
+  count: Int,
+  level: ErrorCorrectionLevel,
+) -> Result(Version, GenerateError) {
+  case level {
+    L ->
+      case count {
+        c if c <= 17 -> Ok(Version(1))
+        c if c <= 32 -> Ok(Version(2))
+        c if c <= 53 -> Ok(Version(3))
+        c if c <= 78 -> Ok(Version(4))
+        c if c <= 106 -> Ok(Version(5))
+        c if c <= 134 -> Ok(Version(6))
+        c if c <= 154 -> Ok(Version(7))
+        c if c <= 192 -> Ok(Version(8))
+        c if c <= 230 -> Ok(Version(9))
+        c if c <= 271 -> Ok(Version(10))
+        c if c <= 321 -> Ok(Version(11))
+        c if c <= 367 -> Ok(Version(12))
+        c if c <= 425 -> Ok(Version(13))
+        c if c <= 458 -> Ok(Version(14))
+        c if c <= 520 -> Ok(Version(15))
+        c if c <= 586 -> Ok(Version(16))
+        c if c <= 644 -> Ok(Version(17))
+        c if c <= 718 -> Ok(Version(18))
+        c if c <= 792 -> Ok(Version(19))
+        c if c <= 858 -> Ok(Version(20))
+        c if c <= 929 -> Ok(Version(21))
+        c if c <= 1003 -> Ok(Version(22))
+        c if c <= 1091 -> Ok(Version(23))
+        c if c <= 1171 -> Ok(Version(24))
+        c if c <= 1273 -> Ok(Version(25))
+        c if c <= 1367 -> Ok(Version(26))
+        c if c <= 1465 -> Ok(Version(27))
+        c if c <= 1528 -> Ok(Version(28))
+        c if c <= 1628 -> Ok(Version(29))
+        c if c <= 1732 -> Ok(Version(30))
+        c if c <= 1840 -> Ok(Version(31))
+        c if c <= 1952 -> Ok(Version(32))
+        c if c <= 2068 -> Ok(Version(33))
+        c if c <= 2188 -> Ok(Version(34))
+        c if c <= 2303 -> Ok(Version(35))
+        c if c <= 2431 -> Ok(Version(36))
+        c if c <= 2563 -> Ok(Version(37))
+        c if c <= 2699 -> Ok(Version(38))
+        c if c <= 2809 -> Ok(Version(39))
+        c if c <= 2953 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 2953,
+          ))
+      }
+    M ->
+      case count {
+        c if c <= 14 -> Ok(Version(1))
+        c if c <= 26 -> Ok(Version(2))
+        c if c <= 42 -> Ok(Version(3))
+        c if c <= 62 -> Ok(Version(4))
+        c if c <= 84 -> Ok(Version(5))
+        c if c <= 106 -> Ok(Version(6))
+        c if c <= 122 -> Ok(Version(7))
+        c if c <= 152 -> Ok(Version(8))
+        c if c <= 180 -> Ok(Version(9))
+        c if c <= 213 -> Ok(Version(10))
+        c if c <= 251 -> Ok(Version(11))
+        c if c <= 287 -> Ok(Version(12))
+        c if c <= 331 -> Ok(Version(13))
+        c if c <= 362 -> Ok(Version(14))
+        c if c <= 412 -> Ok(Version(15))
+        c if c <= 450 -> Ok(Version(16))
+        c if c <= 504 -> Ok(Version(17))
+        c if c <= 560 -> Ok(Version(18))
+        c if c <= 624 -> Ok(Version(19))
+        c if c <= 666 -> Ok(Version(20))
+        c if c <= 711 -> Ok(Version(21))
+        c if c <= 779 -> Ok(Version(22))
+        c if c <= 857 -> Ok(Version(23))
+        c if c <= 911 -> Ok(Version(24))
+        c if c <= 997 -> Ok(Version(25))
+        c if c <= 1059 -> Ok(Version(26))
+        c if c <= 1125 -> Ok(Version(27))
+        c if c <= 1190 -> Ok(Version(28))
+        c if c <= 1264 -> Ok(Version(29))
+        c if c <= 1370 -> Ok(Version(30))
+        c if c <= 1452 -> Ok(Version(31))
+        c if c <= 1538 -> Ok(Version(32))
+        c if c <= 1628 -> Ok(Version(33))
+        c if c <= 1722 -> Ok(Version(34))
+        c if c <= 1809 -> Ok(Version(35))
+        c if c <= 1911 -> Ok(Version(36))
+        c if c <= 1989 -> Ok(Version(37))
+        c if c <= 2099 -> Ok(Version(38))
+        c if c <= 2213 -> Ok(Version(39))
+        c if c <= 2331 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 2331,
+          ))
+      }
+    Q ->
+      case count {
+        c if c <= 11 -> Ok(Version(1))
+        c if c <= 20 -> Ok(Version(2))
+        c if c <= 32 -> Ok(Version(3))
+        c if c <= 46 -> Ok(Version(4))
+        c if c <= 60 -> Ok(Version(5))
+        c if c <= 74 -> Ok(Version(6))
+        c if c <= 86 -> Ok(Version(7))
+        c if c <= 108 -> Ok(Version(8))
+        c if c <= 130 -> Ok(Version(9))
+        c if c <= 151 -> Ok(Version(10))
+        c if c <= 177 -> Ok(Version(11))
+        c if c <= 203 -> Ok(Version(12))
+        c if c <= 241 -> Ok(Version(13))
+        c if c <= 258 -> Ok(Version(14))
+        c if c <= 292 -> Ok(Version(15))
+        c if c <= 322 -> Ok(Version(16))
+        c if c <= 364 -> Ok(Version(17))
+        c if c <= 394 -> Ok(Version(18))
+        c if c <= 442 -> Ok(Version(19))
+        c if c <= 482 -> Ok(Version(20))
+        c if c <= 509 -> Ok(Version(21))
+        c if c <= 565 -> Ok(Version(22))
+        c if c <= 611 -> Ok(Version(23))
+        c if c <= 661 -> Ok(Version(24))
+        c if c <= 715 -> Ok(Version(25))
+        c if c <= 751 -> Ok(Version(26))
+        c if c <= 805 -> Ok(Version(27))
+        c if c <= 868 -> Ok(Version(28))
+        c if c <= 908 -> Ok(Version(29))
+        c if c <= 982 -> Ok(Version(30))
+        c if c <= 1030 -> Ok(Version(31))
+        c if c <= 1112 -> Ok(Version(32))
+        c if c <= 1168 -> Ok(Version(33))
+        c if c <= 1228 -> Ok(Version(34))
+        c if c <= 1283 -> Ok(Version(35))
+        c if c <= 1351 -> Ok(Version(36))
+        c if c <= 1423 -> Ok(Version(37))
+        c if c <= 1499 -> Ok(Version(38))
+        c if c <= 1579 -> Ok(Version(39))
+        c if c <= 1663 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 1663,
+          ))
+      }
+    H ->
+      case count {
+        c if c <= 7 -> Ok(Version(1))
+        c if c <= 14 -> Ok(Version(2))
+        c if c <= 24 -> Ok(Version(3))
+        c if c <= 34 -> Ok(Version(4))
+        c if c <= 44 -> Ok(Version(5))
+        c if c <= 58 -> Ok(Version(6))
+        c if c <= 64 -> Ok(Version(7))
+        c if c <= 84 -> Ok(Version(8))
+        c if c <= 98 -> Ok(Version(9))
+        c if c <= 119 -> Ok(Version(10))
+        c if c <= 137 -> Ok(Version(11))
+        c if c <= 155 -> Ok(Version(12))
+        c if c <= 177 -> Ok(Version(13))
+        c if c <= 194 -> Ok(Version(14))
+        c if c <= 220 -> Ok(Version(15))
+        c if c <= 250 -> Ok(Version(16))
+        c if c <= 280 -> Ok(Version(17))
+        c if c <= 310 -> Ok(Version(18))
+        c if c <= 338 -> Ok(Version(19))
+        c if c <= 382 -> Ok(Version(20))
+        c if c <= 403 -> Ok(Version(21))
+        c if c <= 439 -> Ok(Version(22))
+        c if c <= 461 -> Ok(Version(23))
+        c if c <= 511 -> Ok(Version(24))
+        c if c <= 535 -> Ok(Version(25))
+        c if c <= 593 -> Ok(Version(26))
+        c if c <= 625 -> Ok(Version(27))
+        c if c <= 658 -> Ok(Version(28))
+        c if c <= 698 -> Ok(Version(29))
+        c if c <= 742 -> Ok(Version(30))
+        c if c <= 790 -> Ok(Version(31))
+        c if c <= 842 -> Ok(Version(32))
+        c if c <= 898 -> Ok(Version(33))
+        c if c <= 958 -> Ok(Version(34))
+        c if c <= 983 -> Ok(Version(35))
+        c if c <= 1051 -> Ok(Version(36))
+        c if c <= 1093 -> Ok(Version(37))
+        c if c <= 1139 -> Ok(Version(38))
+        c if c <= 1219 -> Ok(Version(39))
+        c if c <= 1273 -> Ok(Version(40))
+        _ ->
+          Error(ProvidedValueExceedsCapacity(
+            value_length: count,
+            capacity: 1273,
+          ))
+      }
   }
 }
 
@@ -781,16 +1363,12 @@ fn gf_multiply(a: Int, b: Int) -> Int {
   }
 }
 
-fn build_generator_poly(ec_count: Int) -> List(Int) {
-  build_generator_poly_loop(ec_count, [1])
-}
-
-fn build_generator_poly_loop(ec_count: Int, current: List(Int)) -> List(Int) {
+fn build_generator_poly(ec_count: Int, current: List(Int)) -> List(Int) {
   case ec_count {
     0 -> current
     _ -> {
       let next_gen = gf_poly_multiply(current, [1, gf_exp(ec_count - 1)])
-      build_generator_poly_loop(ec_count - 1, next_gen)
+      build_generator_poly(ec_count - 1, next_gen)
     }
   }
 }
@@ -872,7 +1450,7 @@ fn split_into_blocks(
     split_n_blocks(remaining, ec_info.group2_blocks, ec_info.group2_block_size)
 
   let all_data_blocks = list.append(group1_data, group2_data)
-  let generator = build_generator_poly(ec_info.ec_codewords_per_block)
+  let generator = build_generator_poly(ec_info.ec_codewords_per_block, [1])
   let ec_blocks =
     list.map(all_data_blocks, fn(block) {
       compute_ec_codewords(block, generator)
@@ -1475,18 +2053,6 @@ fn matrix_is_function(matrix: Matrix, row: Int, col: Int) -> Bool {
   dict.has_key(matrix.function_modules, #(row, col))
 }
 
-fn matrix_to_rows(matrix: Matrix) -> List(List(Module)) {
-  let n = matrix.size
-  list.map(range_list(0, n - 1), fn(r) {
-    list.map(range_list(0, n - 1), fn(c) {
-      case matrix_get(matrix, r, c) {
-        True -> Dark
-        False -> Light
-      }
-    })
-  })
-}
-
 fn range_list(from: Int, to_inclusive: Int) -> List(Int) {
   case from > to_inclusive {
     True -> []
@@ -1672,88 +2238,6 @@ fn reserve_version_areas(matrix: Matrix, version: Version) -> Matrix {
   }
 }
 
-fn write_format_info(
-  matrix: Matrix,
-  level: ErrorCorrectionLevel,
-  mask: Int,
-) -> Matrix {
-  let n = matrix.size
-  let bits = compute_format_bits(level, mask)
-  let copy1_positions = [
-    #(8, 0),
-    #(8, 1),
-    #(8, 2),
-    #(8, 3),
-    #(8, 4),
-    #(8, 5),
-    #(8, 7),
-    #(8, 8),
-    #(7, 8),
-    #(5, 8),
-    #(4, 8),
-    #(3, 8),
-    #(2, 8),
-    #(1, 8),
-    #(0, 8),
-  ]
-  let copy2_positions = [
-    #(n - 1, 8),
-    #(n - 2, 8),
-    #(n - 3, 8),
-    #(n - 4, 8),
-    #(n - 5, 8),
-    #(n - 6, 8),
-    #(n - 7, 8),
-    #(8, n - 8),
-    #(8, n - 7),
-    #(8, n - 6),
-    #(8, n - 5),
-    #(8, n - 4),
-    #(8, n - 3),
-    #(8, n - 2),
-    #(8, n - 1),
-  ]
-  let mat = write_bits_to_positions(matrix, bits, copy1_positions, 15, 0)
-  write_bits_to_positions(mat, bits, copy2_positions, 15, 0)
-}
-
-fn write_bits_to_positions(
-  matrix: Matrix,
-  bits: Int,
-  positions: List(#(Int, Int)),
-  num_bits: Int,
-  index: Int,
-) -> Matrix {
-  case positions {
-    [] -> matrix
-    [#(r, c), ..rest] -> {
-      let shift = num_bits - 1 - index
-      let bit_val =
-        int.bitwise_and(int.bitwise_shift_right(bits, shift), 1) == 1
-      let mat = matrix_set(matrix, r, c, bit_val, True)
-      write_bits_to_positions(mat, bits, rest, num_bits, index + 1)
-    }
-  }
-}
-
-fn write_version_info(matrix: Matrix, version: Version) -> Matrix {
-  let Version(v) = version
-  case v >= 7 {
-    False -> matrix
-    True -> {
-      let n = matrix.size
-      let bits = compute_version_bits(version)
-      list.fold(range_list(0, 17), matrix, fn(m, i) {
-        let bit_val = int.bitwise_and(int.bitwise_shift_right(bits, i), 1) == 1
-        let col = i / 3
-        let row = i % 3
-        let m = matrix_set(m, n - 11 + row, col, bit_val, True)
-        matrix_set(m, col, n - 11 + row, bit_val, True)
-      })
-    }
-  }
-}
-
 fn bit_length(n: Int) -> Int {
   bit_length_loop(n, 0)
 }
@@ -1902,291 +2386,464 @@ fn mask_condition(mask: Int, row: Int, col: Int) -> Bool {
   }
 }
 
-fn apply_mask(matrix: Matrix, mask: Int) -> Matrix {
+fn find_best_mask_and_render(
+  matrix: Matrix,
+  version: Version,
+  level: ErrorCorrectionLevel,
+) -> Qr {
   let n = matrix.size
-  list.fold(range_list(0, n - 1), matrix, fn(mat, r) {
-    list.fold(range_list(0, n - 1), mat, fn(m, c) {
-      case matrix_is_function(m, r, c) {
-        True -> m
-        False -> {
-          case mask_condition(mask, r, c) {
-            True -> {
-              let current = matrix_get(m, r, c)
-              matrix_set(m, r, c, !current, False)
-            }
-            False -> m
-          }
-        }
-      }
-    })
+  // Convert to fast list representation once
+  let base_rows = matrix_to_rows_bool(matrix)
+  let func_rows = matrix_to_function_rows(matrix)
+
+  // Find best mask using fast operations
+  let best_mask =
+    find_best_mask_fast(base_rows, func_rows, n, version, level, 0, -1, 0)
+
+  // Apply best mask and render directly to output (skip Dict operations)
+  let final_rows =
+    apply_mask_fast(base_rows, func_rows, best_mask)
+    |> write_format_info_fast(n, level, best_mask)
+    |> write_version_info_fast(n, version)
+
+  Qr(n, final_rows)
+}
+
+fn matrix_to_rows_bool(matrix: Matrix) -> List(List(Bool)) {
+  let n = matrix.size
+  list.map(range_list(0, n - 1), fn(r) {
+    list.map(range_list(0, n - 1), fn(c) { matrix_get(matrix, r, c) })
   })
 }
 
-fn penalty_runs(matrix: Matrix) -> Int {
+fn matrix_to_function_rows(matrix: Matrix) -> List(List(Bool)) {
   let n = matrix.size
-  let rows = range_list(0, n - 1)
-  let horizontal =
-    list.fold(rows, 0, fn(total, r) {
-      total + penalty_runs_line(matrix, n, r, True, 0, False, 0)
-    })
-  let vertical =
-    list.fold(rows, 0, fn(total, c) {
-      total + penalty_runs_line(matrix, n, c, False, 0, False, 0)
-    })
-  horizontal + vertical
+  list.map(range_list(0, n - 1), fn(r) {
+    list.map(range_list(0, n - 1), fn(c) { matrix_is_function(matrix, r, c) })
+  })
 }
 
-fn penalty_runs_line(
-  matrix: Matrix,
+fn find_best_mask_fast(
+  base_rows: List(List(Bool)),
+  func_rows: List(List(Bool)),
   n: Int,
-  fixed: Int,
-  horizontal: Bool,
-  pos: Int,
-  last_color: Bool,
-  run_length: Int,
+  version: Version,
+  level: ErrorCorrectionLevel,
+  mask: Int,
+  best_score: Int,
+  best_mask: Int,
 ) -> Int {
-  case pos >= n {
-    True ->
-      case run_length >= 5 {
-        True -> 3 + run_length - 5
-        False -> 0
-      }
+  case mask > 7 {
+    True -> best_mask
     False -> {
-      let color = case horizontal {
-        True -> matrix_get(matrix, fixed, pos)
-        False -> matrix_get(matrix, pos, fixed)
-      }
-      case pos == 0 {
+      let candidate_rows =
+        apply_mask_fast(base_rows, func_rows, mask)
+        |> write_format_info_fast(n, level, mask)
+        |> write_version_info_fast(n, version)
+      let score = compute_penalty_fast(candidate_rows)
+      case best_score < 0 || score < best_score {
         True ->
-          penalty_runs_line(matrix, n, fixed, horizontal, pos + 1, color, 1)
+          find_best_mask_fast(
+            base_rows,
+            func_rows,
+            n,
+            version,
+            level,
+            mask + 1,
+            score,
+            mask,
+          )
         False ->
-          case color == last_color {
-            True ->
-              penalty_runs_line(
-                matrix,
-                n,
-                fixed,
-                horizontal,
-                pos + 1,
-                color,
-                run_length + 1,
-              )
-            False -> {
-              let penalty = case run_length >= 5 {
-                True -> 3 + run_length - 5
-                False -> 0
-              }
-              penalty
-              + penalty_runs_line(
-                matrix,
-                n,
-                fixed,
-                horizontal,
-                pos + 1,
-                color,
-                1,
-              )
-            }
+          find_best_mask_fast(
+            base_rows,
+            func_rows,
+            n,
+            version,
+            level,
+            mask + 1,
+            best_score,
+            best_mask,
+          )
+      }
+    }
+  }
+}
+
+fn apply_mask_fast(
+  base_rows: List(List(Bool)),
+  func_rows: List(List(Bool)),
+  mask: Int,
+) -> List(List(Bool)) {
+  list.index_map(list.zip(base_rows, func_rows), fn(row_pair, r) {
+    let #(mod_row, func_row) = row_pair
+    list.index_map(list.zip(mod_row, func_row), fn(cell_pair, c) {
+      let #(value, is_func) = cell_pair
+      case is_func {
+        True -> value
+        False ->
+          case mask_condition(mask, r, c) {
+            True -> !value
+            False -> value
           }
       }
-    }
-  }
-}
-
-fn penalty_blocks(matrix: Matrix) -> Int {
-  let n = matrix.size
-  list.fold(range_list(0, n - 2), 0, fn(total, r) {
-    list.fold(range_list(0, n - 2), total, fn(acc, c) {
-      let v = matrix_get(matrix, r, c)
-      case
-        matrix_get(matrix, r, c + 1) == v
-        && matrix_get(matrix, r + 1, c) == v
-        && matrix_get(matrix, r + 1, c + 1) == v
-      {
-        True -> acc + 3
-        False -> acc
-      }
     })
   })
 }
 
-fn penalty_finder_like(matrix: Matrix) -> Int {
-  let n = matrix.size
-  let pattern_a = [
-    True,
-    False,
-    True,
-    True,
-    True,
-    False,
-    True,
-    False,
-    False,
-    False,
-    False,
-  ]
-  let pattern_b = [
-    False,
-    False,
-    False,
-    False,
-    True,
-    False,
-    True,
-    True,
-    True,
-    False,
-    True,
-  ]
-  list.fold(range_list(0, n - 1), 0, fn(total, r) {
-    list.fold(range_list(0, n - 11), total, fn(acc, c) {
-      let h_match =
-        check_pattern(matrix, r, c, True, pattern_a)
-        || check_pattern(matrix, r, c, True, pattern_b)
-      let v_match =
-        check_pattern(matrix, c, r, False, pattern_a)
-        || check_pattern(matrix, c, r, False, pattern_b)
-      let penalty = case h_match {
-        True -> 40
-        False -> 0
-      }
-      let penalty2 = case v_match {
-        True -> 40
-        False -> 0
-      }
-      acc + penalty + penalty2
-    })
-  })
+fn write_format_info_fast(
+  rows: List(List(Bool)),
+  n: Int,
+  level: ErrorCorrectionLevel,
+  mask: Int,
+) -> List(List(Bool)) {
+  let bits = compute_format_bits(level, mask)
+  // Write format bits to both copies
+  rows
+  |> set_fast(8, 0, get_int_bit(bits, 14))
+  |> set_fast(8, 1, get_int_bit(bits, 13))
+  |> set_fast(8, 2, get_int_bit(bits, 12))
+  |> set_fast(8, 3, get_int_bit(bits, 11))
+  |> set_fast(8, 4, get_int_bit(bits, 10))
+  |> set_fast(8, 5, get_int_bit(bits, 9))
+  |> set_fast(8, 7, get_int_bit(bits, 8))
+  |> set_fast(8, 8, get_int_bit(bits, 7))
+  |> set_fast(7, 8, get_int_bit(bits, 6))
+  |> set_fast(5, 8, get_int_bit(bits, 5))
+  |> set_fast(4, 8, get_int_bit(bits, 4))
+  |> set_fast(3, 8, get_int_bit(bits, 3))
+  |> set_fast(2, 8, get_int_bit(bits, 2))
+  |> set_fast(1, 8, get_int_bit(bits, 1))
+  |> set_fast(0, 8, get_int_bit(bits, 0))
+  // Second copy
+  |> set_fast(n - 1, 8, get_int_bit(bits, 14))
+  |> set_fast(n - 2, 8, get_int_bit(bits, 13))
+  |> set_fast(n - 3, 8, get_int_bit(bits, 12))
+  |> set_fast(n - 4, 8, get_int_bit(bits, 11))
+  |> set_fast(n - 5, 8, get_int_bit(bits, 10))
+  |> set_fast(n - 6, 8, get_int_bit(bits, 9))
+  |> set_fast(n - 7, 8, get_int_bit(bits, 8))
+  |> set_fast(8, n - 8, get_int_bit(bits, 7))
+  |> set_fast(8, n - 7, get_int_bit(bits, 6))
+  |> set_fast(8, n - 6, get_int_bit(bits, 5))
+  |> set_fast(8, n - 5, get_int_bit(bits, 4))
+  |> set_fast(8, n - 4, get_int_bit(bits, 3))
+  |> set_fast(8, n - 3, get_int_bit(bits, 2))
+  |> set_fast(8, n - 2, get_int_bit(bits, 1))
+  |> set_fast(8, n - 1, get_int_bit(bits, 0))
 }
 
-fn check_pattern(
-  matrix: Matrix,
-  row_or_fixed: Int,
-  start: Int,
-  horizontal: Bool,
-  pattern: List(Bool),
-) -> Bool {
-  check_pattern_loop(matrix, row_or_fixed, start, horizontal, pattern, 0)
-}
-
-fn check_pattern_loop(
-  matrix: Matrix,
-  fixed: Int,
-  start: Int,
-  horizontal: Bool,
-  pattern: List(Bool),
-  index: Int,
-) -> Bool {
-  case pattern {
-    [] -> True
-    [expected, ..rest] -> {
-      let actual = case horizontal {
-        True -> matrix_get(matrix, fixed, start + index)
-        False -> matrix_get(matrix, start + index, fixed)
-      }
-      case actual == expected {
-        True ->
-          check_pattern_loop(matrix, fixed, start, horizontal, rest, index + 1)
-        False -> False
-      }
+fn write_version_info_fast(
+  rows: List(List(Bool)),
+  n: Int,
+  version: Version,
+) -> List(List(Bool)) {
+  let Version(v) = version
+  case v >= 7 {
+    False -> rows
+    True -> {
+      let bits = compute_version_bits(version)
+      write_version_bits_fast(rows, n, bits, 0)
     }
   }
 }
 
-fn penalty_balance(matrix: Matrix) -> Int {
-  let n = matrix.size
+fn write_version_bits_fast(
+  rows: List(List(Bool)),
+  n: Int,
+  bits: Int,
+  i: Int,
+) -> List(List(Bool)) {
+  case i > 17 {
+    True -> rows
+    False -> {
+      let bit_val = int.bitwise_and(int.bitwise_shift_right(bits, i), 1) == 1
+      let col = i / 3
+      let row = i % 3
+      rows
+      |> set_fast(n - 11 + row, col, bit_val)
+      |> set_fast(col, n - 11 + row, bit_val)
+      |> write_version_bits_fast(n, bits, i + 1)
+    }
+  }
+}
+
+fn get_int_bit(bits: Int, pos: Int) -> Bool {
+  int.bitwise_and(int.bitwise_shift_right(bits, pos), 1) == 1
+}
+
+fn set_fast(
+  rows: List(List(Bool)),
+  row: Int,
+  col: Int,
+  value: Bool,
+) -> List(List(Bool)) {
+  list.index_map(rows, fn(r, ri) {
+    case ri == row {
+      True ->
+        list.index_map(r, fn(cell, ci) {
+          case ci == col {
+            True -> value
+            False -> cell
+          }
+        })
+      False -> r
+    }
+  })
+}
+
+fn compute_penalty_fast(rows: List(List(Bool))) -> Int {
+  let n = list.length(rows)
+
+  // Single pass over rows: horizontal runs, finder patterns, dark count, blocks
+  let #(h_runs, h_finder, dark_count, blocks) =
+    process_rows_combined(rows, [], 0, 0, 0, 0)
+
+  // Single transpose (was being done twice before!)
+  let columns = list.transpose(rows)
+
+  // Process columns for vertical runs and finder patterns in one pass
+  let columns_to_check = list.take(columns, n - 10)
+  let remaining_columns = list.drop(columns, n - 10)
+
+  // Columns that need finder pattern checking (with padding)
+  let #(v_runs_partial, v_finder) =
+    process_columns_with_finder(columns_to_check, n, 0, 0)
+
+  // Remaining columns only need runs
+  let v_runs_rest =
+    list.fold(remaining_columns, 0, fn(acc, col) {
+      acc + penalty_line_runs(col)
+    })
+
+  let v_runs = v_runs_partial + v_runs_rest
+
+  // Balance calculation
   let total_modules = n * n
-  let dark_count =
-    list.fold(range_list(0, n - 1), 0, fn(total, r) {
-      list.fold(range_list(0, n - 1), total, fn(acc, c) {
-        case matrix_get(matrix, r, c) {
-          True -> acc + 1
-          False -> acc
-        }
-      })
-    })
   let percentage = dark_count * 100 / total_modules
   let prev_five = percentage - percentage % 5
   let next_five = prev_five + 5
   let deviation1 = int.absolute_value(prev_five - 50) / 5
   let deviation2 = int.absolute_value(next_five - 50) / 5
-  case deviation1 < deviation2 {
+  let balance = case deviation1 < deviation2 {
     True -> deviation1 * 10
     False -> deviation2 * 10
   }
+
+  h_runs + v_runs + blocks + h_finder + v_finder + balance
 }
 
-fn compute_penalty(matrix: Matrix) -> Int {
-  penalty_runs(matrix)
-  + penalty_blocks(matrix)
-  + penalty_finder_like(matrix)
-  + penalty_balance(matrix)
-}
-
-fn find_best_mask(
-  matrix: Matrix,
-  version: Version,
-  level: ErrorCorrectionLevel,
-) -> Matrix {
-  find_best_mask_loop(matrix, version, level, 0, -1, matrix)
-}
-
-fn find_best_mask_loop(
-  matrix: Matrix,
-  version: Version,
-  level: ErrorCorrectionLevel,
-  mask: Int,
-  best_score: Int,
-  best_matrix: Matrix,
-) -> Matrix {
-  case mask > 7 {
-    True -> best_matrix
-    False -> {
-      let candidate =
-        matrix
-        |> apply_mask(mask)
-        |> write_format_info(level, mask)
-        |> write_version_info(version)
-      let score = compute_penalty(candidate)
-      case best_score < 0 || score < best_score {
-        True ->
-          find_best_mask_loop(
-            matrix,
-            version,
-            level,
-            mask + 1,
-            score,
-            candidate,
-          )
-        False ->
-          find_best_mask_loop(
-            matrix,
-            version,
-            level,
-            mask + 1,
-            best_score,
-            best_matrix,
-          )
+fn process_rows_combined(
+  rows: List(List(Bool)),
+  prev_row: List(Bool),
+  h_runs: Int,
+  h_finder: Int,
+  dark_count: Int,
+  blocks: Int,
+) -> #(Int, Int, Int, Int) {
+  case rows {
+    [] -> #(h_runs, h_finder, dark_count, blocks)
+    [row, ..rest] -> {
+      let row_runs = penalty_line_runs(row)
+      let row_finder = check_finder_patterns_in_line(row)
+      let row_darks = count_true(row, 0)
+      let row_blocks = case prev_row {
+        [] -> 0
+        _ -> penalty_blocks_row_pair(prev_row, row, 0)
       }
+      process_rows_combined(
+        rest,
+        row,
+        h_runs + row_runs,
+        h_finder + row_finder,
+        dark_count + row_darks,
+        blocks + row_blocks,
+      )
     }
   }
 }
 
-fn pad_matrix(matrix: List(List(Module)), quiet_zone: Int) -> List(List(Module)) {
-  let size = list.length(matrix)
-  let total_width = size + quiet_zone * 2
-  let quiet_row = list.repeat(Light, total_width)
-  let quiet_rows = list.repeat(quiet_row, quiet_zone)
-  let side_padding = list.repeat(Light, quiet_zone)
-  let padded_rows =
-    list.map(matrix, fn(row) { list.flatten([side_padding, row, side_padding]) })
-  list.flatten([quiet_rows, padded_rows, quiet_rows])
+fn count_true(row: List(Bool), acc: Int) -> Int {
+  case row {
+    [] -> acc
+    [True, ..rest] -> count_true(rest, acc + 1)
+    [False, ..rest] -> count_true(rest, acc)
+  }
 }
 
-fn pair_rows(rows: List(List(Module))) -> List(#(List(Module), List(Module))) {
-  case rows {
-    [top, bottom, ..rest] -> [#(top, bottom), ..pair_rows(rest)]
-    [top] -> [#(top, list.repeat(Light, list.length(top)))]
-    [] -> []
+fn process_columns_with_finder(
+  columns: List(List(Bool)),
+  n: Int,
+  runs_acc: Int,
+  finder_acc: Int,
+) -> #(Int, Int) {
+  case columns {
+    [] -> #(runs_acc, finder_acc)
+    [col, ..rest] -> {
+      let col_runs = penalty_line_runs(col)
+      // Pad column for finder pattern check
+      let padded =
+        list.append(col, [
+          False,
+          False,
+          False,
+          False,
+          False,
+          False,
+          False,
+          False,
+          False,
+          False,
+        ])
+      let col_finder = check_finder_patterns_in_line_n(padded, n)
+      process_columns_with_finder(
+        rest,
+        n,
+        runs_acc + col_runs,
+        finder_acc + col_finder,
+      )
+    }
+  }
+}
+
+fn penalty_line_runs(line: List(Bool)) -> Int {
+  penalty_line_runs_loop(line, False, 0, 0)
+}
+
+fn penalty_line_runs_loop(
+  line: List(Bool),
+  last_color: Bool,
+  run_length: Int,
+  acc: Int,
+) -> Int {
+  case line {
+    [] ->
+      case run_length >= 5 {
+        True -> acc + 3 + run_length - 5
+        False -> acc
+      }
+    [color, ..rest] ->
+      case run_length == 0 {
+        True -> penalty_line_runs_loop(rest, color, 1, acc)
+        False ->
+          case color == last_color {
+            True -> penalty_line_runs_loop(rest, color, run_length + 1, acc)
+            False -> {
+              let penalty = case run_length >= 5 {
+                True -> 3 + run_length - 5
+                False -> 0
+              }
+              penalty_line_runs_loop(rest, color, 1, acc + penalty)
+            }
+          }
+      }
+  }
+}
+
+fn penalty_blocks_row_pair(row1: List(Bool), row2: List(Bool), acc: Int) -> Int {
+  case row1, row2 {
+    [a, b, ..rest1], [c, d, ..rest2] -> {
+      let penalty = case a == b && a == c && a == d {
+        True -> 3
+        False -> 0
+      }
+      penalty_blocks_row_pair([b, ..rest1], [d, ..rest2], acc + penalty)
+    }
+    _, _ -> acc
+  }
+}
+
+fn check_finder_patterns_in_line_n(line: List(Bool), n: Int) -> Int {
+  check_finder_sliding_n(line, 0, n)
+}
+
+fn check_finder_sliding_n(line: List(Bool), pos: Int, n: Int) -> Int {
+  case pos >= n {
+    True -> 0
+    False ->
+      case line {
+        [a, b, c, d, e, f, g, h, i, j, k, ..rest] -> {
+          let matches_a =
+            a == True
+            && b == False
+            && c == True
+            && d == True
+            && e == True
+            && f == False
+            && g == True
+            && h == False
+            && i == False
+            && j == False
+            && k == False
+          let matches_b =
+            a == False
+            && b == False
+            && c == False
+            && d == False
+            && e == True
+            && f == False
+            && g == True
+            && h == True
+            && i == True
+            && j == False
+            && k == True
+          let penalty = case matches_a || matches_b {
+            True -> 40
+            False -> 0
+          }
+          penalty
+          + check_finder_sliding_n(
+            [b, c, d, e, f, g, h, i, j, k, ..rest],
+            pos + 1,
+            n,
+          )
+        }
+        _ -> 0
+      }
+  }
+}
+
+fn check_finder_patterns_in_line(line: List(Bool)) -> Int {
+  check_finder_sliding(line, 0)
+}
+
+fn check_finder_sliding(line: List(Bool), acc: Int) -> Int {
+  case line {
+    [a, b, c, d, e, f, g, h, i, j, k, ..rest] -> {
+      // Pattern A: 1,0,1,1,1,0,1,0,0,0,0 (True=dark)
+      // Pattern B: 0,0,0,0,1,0,1,1,1,0,1
+      let matches_a =
+        a == True
+        && b == False
+        && c == True
+        && d == True
+        && e == True
+        && f == False
+        && g == True
+        && h == False
+        && i == False
+        && j == False
+        && k == False
+      let matches_b =
+        a == False
+        && b == False
+        && c == False
+        && d == False
+        && e == True
+        && f == False
+        && g == True
+        && h == True
+        && i == True
+        && j == False
+        && k == True
+      let penalty = case matches_a || matches_b {
+        True -> 40
+        False -> 0
+      }
+      check_finder_sliding(
+        [b, c, d, e, f, g, h, i, j, k, ..rest],
+        acc + penalty,
+      )
+    }
+    _ -> acc
   }
 }
