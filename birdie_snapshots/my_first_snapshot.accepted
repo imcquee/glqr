@@ -1,7 +1,0 @@
----
-version: 1.5.4
-title: my first snapshot
-file: ./test/glqr_test.gleam
-test_name: hello_birdie_test
----
-🐦‍⬛ Smile for the birdie!

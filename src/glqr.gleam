@@ -1,7 +1,10 @@
 import gleam/bit_array
 import gleam/dict.{type Dict}
+import gleam/float
 import gleam/int
+import gleam/io
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -176,8 +179,16 @@ fn guard_version(
   }
 }
 
+/// Print the QR code to standard output using Unicode block characters
+/// This is a convenience for `io.println(to_printable(qr))`, avoiding the
+/// `echo` pitfall described on `to_printable`
+pub fn print(qr: Qr) -> Nil {
+  io.println(to_printable(qr))
+}
+
 /// Convert the QR code into a printable string representation using Unicode block characters
-/// You must use io.println to print this rather than echo as echo will preserve the newlines
+/// You must use io.println to print this rather than echo, as echo debug-prints
+/// the string representation with the newlines escaped as `\n`
 pub fn to_printable(qr: Qr) -> String {
   let Qr(size, rows) = qr
   let quiet_zone = 4
@@ -1241,7 +1252,7 @@ fn ec_info(version: Version, level: ErrorCorrectionLevel) -> ECInfo {
     40, M -> ECInfo(2334, 28, 18, 47, 31, 48)
     40, Q -> ECInfo(1666, 30, 34, 24, 34, 25)
     40, H -> ECInfo(1276, 30, 20, 15, 61, 16)
-    _, _ -> ECInfo(0, 0, 0, 0, 0, 0)
+    _, _ -> panic as "unreachable: Version is opaque and always within 1-40"
   }
 }
 
@@ -2157,7 +2168,7 @@ fn alignment_centers(version: Version) -> List(Int) {
     38 -> [6, 32, 58, 84, 110, 136, 162]
     39 -> [6, 26, 54, 82, 110, 138, 166]
     40 -> [6, 30, 58, 86, 114, 142, 170]
-    _ -> []
+    _ -> panic as "unreachable: Version is opaque and always within 1-40"
   }
 }
 
@@ -2307,14 +2318,16 @@ fn bitarray_to_bool_list_loop(bits: BitArray, acc: List(Bool)) -> List(Bool) {
 
 fn zigzag_coords(n: Int) -> List(#(Int, Int)) {
   zigzag_coords_loop(n, n - 1, True, [])
+  |> list.reverse
+  |> list.flatten
 }
 
 fn zigzag_coords_loop(
   n: Int,
   right_col: Int,
   going_up: Bool,
-  acc: List(#(Int, Int)),
-) -> List(#(Int, Int)) {
+  acc: List(List(#(Int, Int))),
+) -> List(List(#(Int, Int))) {
   case right_col < 0 {
     True -> acc
     False -> {
@@ -2334,12 +2347,7 @@ fn zigzag_coords_loop(
             False -> [#(row, right_col)]
           }
         })
-      zigzag_coords_loop(
-        n,
-        right_col - 2,
-        !going_up,
-        list.append(acc, new_coords),
-      )
+      zigzag_coords_loop(n, right_col - 2, !going_up, [new_coords, ..acc])
     }
   }
 }
@@ -2601,21 +2609,16 @@ fn compute_penalty_fast(rows: List(List(Bool))) -> Int {
   // Single transpose (was being done twice before!)
   let columns = list.transpose(rows)
 
-  // Process columns for vertical runs and finder patterns in one pass
-  let columns_to_check = list.take(columns, n - 10)
-  let remaining_columns = list.drop(columns, n - 10)
-
-  // Columns that need finder pattern checking (with padding)
-  let #(v_runs_partial, v_finder) =
-    process_columns_with_finder(columns_to_check, n, 0, 0)
-
-  // Remaining columns only need runs
-  let v_runs_rest =
-    list.fold(remaining_columns, 0, fn(acc, col) {
-      acc + penalty_line_runs(col)
+  // Process every column for vertical runs and finder patterns in one pass,
+  // using the same unpadded sliding window as the rows
+  let #(v_runs, v_finder) =
+    list.fold(columns, #(0, 0), fn(acc, col) {
+      let #(runs, finder) = acc
+      #(
+        runs + penalty_line_runs(col),
+        finder + check_finder_patterns_in_line(col),
+      )
     })
-
-  let v_runs = v_runs_partial + v_runs_rest
 
   // Balance calculation
   let total_modules = n * n
@@ -2670,41 +2673,6 @@ fn count_true(row: List(Bool), acc: Int) -> Int {
   }
 }
 
-fn process_columns_with_finder(
-  columns: List(List(Bool)),
-  n: Int,
-  runs_acc: Int,
-  finder_acc: Int,
-) -> #(Int, Int) {
-  case columns {
-    [] -> #(runs_acc, finder_acc)
-    [col, ..rest] -> {
-      let col_runs = penalty_line_runs(col)
-      // Pad column for finder pattern check
-      let padded =
-        list.append(col, [
-          False,
-          False,
-          False,
-          False,
-          False,
-          False,
-          False,
-          False,
-          False,
-          False,
-        ])
-      let col_finder = check_finder_patterns_in_line_n(padded, n)
-      process_columns_with_finder(
-        rest,
-        n,
-        runs_acc + col_runs,
-        finder_acc + col_finder,
-      )
-    }
-  }
-}
-
 fn penalty_line_runs(line: List(Bool)) -> Int {
   penalty_line_runs_loop(line, False, 0, 0)
 }
@@ -2752,56 +2720,6 @@ fn penalty_blocks_row_pair(row1: List(Bool), row2: List(Bool), acc: Int) -> Int 
   }
 }
 
-fn check_finder_patterns_in_line_n(line: List(Bool), n: Int) -> Int {
-  check_finder_sliding_n(line, 0, n)
-}
-
-fn check_finder_sliding_n(line: List(Bool), pos: Int, n: Int) -> Int {
-  case pos >= n {
-    True -> 0
-    False ->
-      case line {
-        [a, b, c, d, e, f, g, h, i, j, k, ..rest] -> {
-          let matches_a =
-            a == True
-            && b == False
-            && c == True
-            && d == True
-            && e == True
-            && f == False
-            && g == True
-            && h == False
-            && i == False
-            && j == False
-            && k == False
-          let matches_b =
-            a == False
-            && b == False
-            && c == False
-            && d == False
-            && e == True
-            && f == False
-            && g == True
-            && h == True
-            && i == True
-            && j == False
-            && k == True
-          let penalty = case matches_a || matches_b {
-            True -> 40
-            False -> 0
-          }
-          penalty
-          + check_finder_sliding_n(
-            [b, c, d, e, f, g, h, i, j, k, ..rest],
-            pos + 1,
-            n,
-          )
-        }
-        _ -> 0
-      }
-  }
-}
-
 fn check_finder_patterns_in_line(line: List(Bool)) -> Int {
   check_finder_sliding(line, 0)
 }
@@ -2845,5 +2763,250 @@ fn check_finder_sliding(line: List(Bool), acc: Int) -> Int {
       )
     }
     _ -> acc
+  }
+}
+
+// Standard content format builders
+// These functions produce strings in the de facto standard formats that QR
+// code scanners recognise, ready to be passed to `new`
+// Plain URLs need no helper - pass them directly to `new`
+
+/// Authentication used by a WiFi network
+/// - `Wpa`: WPA/WPA2 with the given password
+/// - `Wep`: WEP with the given password
+/// - `NoPassword`: an open network
+pub type WifiAuthentication {
+  Wpa(password: String)
+  Wep(password: String)
+  NoPassword
+}
+
+/// Build a WiFi network configuration payload
+/// Scanning the resulting QR code prompts the device to join the network
+///
+/// Produces `WIFI:S:<ssid>;T:<WPA|WEP|nopass>;P:<password>;H:true;;`
+/// Special characters in the SSID and password are escaped automatically
+pub fn wifi(
+  ssid ssid: String,
+  authentication authentication: WifiAuthentication,
+  hidden hidden: Bool,
+) -> String {
+  let credentials = case authentication {
+    Wpa(password) -> "T:WPA;P:" <> escape_wifi(password) <> ";"
+    Wep(password) -> "T:WEP;P:" <> escape_wifi(password) <> ";"
+    NoPassword -> "T:nopass;"
+  }
+  let hidden_field = case hidden {
+    True -> "H:true;"
+    False -> ""
+  }
+  "WIFI:S:" <> escape_wifi(ssid) <> ";" <> credentials <> hidden_field <> ";"
+}
+
+/// Contact information for a vCard payload
+/// Create one with `v_card`, add optional fields with the `v_card_*`
+/// functions, then convert it with `v_card_to_string`
+pub opaque type VCard {
+  VCard(
+    name: String,
+    phone: Option(String),
+    email: Option(String),
+    address: Option(String),
+    organization: Option(String),
+    job_title: Option(String),
+    website: Option(String),
+    note: Option(String),
+  )
+}
+
+/// Create a new vCard with the given full name
+pub fn v_card(name name: String) -> VCard {
+  VCard(
+    name: name,
+    phone: None,
+    email: None,
+    address: None,
+    organization: None,
+    job_title: None,
+    website: None,
+    note: None,
+  )
+}
+
+/// Set the phone number for the vCard
+pub fn v_card_phone(card: VCard, phone: String) -> VCard {
+  VCard(..card, phone: Some(phone))
+}
+
+/// Set the email address for the vCard
+pub fn v_card_email(card: VCard, email: String) -> VCard {
+  VCard(..card, email: Some(email))
+}
+
+/// Set the postal address for the vCard as a single free-form string
+pub fn v_card_address(card: VCard, address: String) -> VCard {
+  VCard(..card, address: Some(address))
+}
+
+/// Set the organization for the vCard
+pub fn v_card_organization(card: VCard, organization: String) -> VCard {
+  VCard(..card, organization: Some(organization))
+}
+
+/// Set the job title for the vCard
+pub fn v_card_job_title(card: VCard, job_title: String) -> VCard {
+  VCard(..card, job_title: Some(job_title))
+}
+
+/// Set the website URL for the vCard
+pub fn v_card_website(card: VCard, website: String) -> VCard {
+  VCard(..card, website: Some(website))
+}
+
+/// Set a free-form note for the vCard
+pub fn v_card_note(card: VCard, note: String) -> VCard {
+  VCard(..card, note: Some(note))
+}
+
+/// Convert the vCard into its string payload (vCard version 3.0)
+pub fn v_card_to_string(card: VCard) -> String {
+  let address_line = case card.address {
+    Some(address) -> "ADR:;;" <> escape_text(address) <> ";;;;\r\n"
+    None -> ""
+  }
+  "BEGIN:VCARD\r\n"
+  <> "VERSION:3.0\r\n"
+  <> "N:"
+  <> escape_text(card.name)
+  <> "\r\n"
+  <> "FN:"
+  <> escape_text(card.name)
+  <> "\r\n"
+  <> optional_line("ORG", card.organization)
+  <> optional_line("TITLE", card.job_title)
+  <> optional_line("TEL", card.phone)
+  <> optional_line("EMAIL", card.email)
+  <> address_line
+  <> optional_line("URL", card.website)
+  <> optional_line("NOTE", card.note)
+  <> "END:VCARD"
+}
+
+/// A calendar event for a vEvent payload
+/// Create one with `calendar_event`, add optional fields with the
+/// `calendar_event_*` functions, then convert it with
+/// `calendar_event_to_string`
+pub opaque type CalendarEvent {
+  CalendarEvent(
+    summary: String,
+    starts_at: String,
+    ends_at: String,
+    location: Option(String),
+    description: Option(String),
+  )
+}
+
+/// Create a new calendar event
+/// Timestamps use the iCalendar format: `YYYYMMDDThhmmssZ` for UTC
+/// (for example `20260719T093000Z`) or `YYYYMMDDThhmmss` for local time
+pub fn calendar_event(
+  summary summary: String,
+  starts_at starts_at: String,
+  ends_at ends_at: String,
+) -> CalendarEvent {
+  CalendarEvent(
+    summary: summary,
+    starts_at: starts_at,
+    ends_at: ends_at,
+    location: None,
+    description: None,
+  )
+}
+
+/// Set the location for the calendar event
+pub fn calendar_event_location(
+  event: CalendarEvent,
+  location: String,
+) -> CalendarEvent {
+  CalendarEvent(..event, location: Some(location))
+}
+
+/// Set a description for the calendar event
+pub fn calendar_event_description(
+  event: CalendarEvent,
+  description: String,
+) -> CalendarEvent {
+  CalendarEvent(..event, description: Some(description))
+}
+
+/// Convert the calendar event into its string payload (iCalendar vEvent)
+pub fn calendar_event_to_string(event: CalendarEvent) -> String {
+  "BEGIN:VEVENT\r\n"
+  <> "SUMMARY:"
+  <> escape_text(event.summary)
+  <> "\r\n"
+  <> "DTSTART:"
+  <> event.starts_at
+  <> "\r\n"
+  <> "DTEND:"
+  <> event.ends_at
+  <> "\r\n"
+  <> optional_line("LOCATION", event.location)
+  <> optional_line("DESCRIPTION", event.description)
+  <> "END:VEVENT"
+}
+
+/// Build an email payload, e.g. `mailto:hello@example.com`
+/// Scanning the resulting QR code opens the mail client with the recipient
+/// filled in
+pub fn email(address: String) -> String {
+  "mailto:" <> address
+}
+
+/// Build a phone number payload, e.g. `tel:+461234567`
+/// Scanning the resulting QR code prompts the device to call the number
+pub fn phone(number: String) -> String {
+  "tel:" <> number
+}
+
+/// Build an SMS payload, e.g. `smsto:+461234567:Hello!`
+/// Pass an empty message to only fill in the recipient
+pub fn sms(number number: String, message message: String) -> String {
+  case message {
+    "" -> "smsto:" <> number
+    _ -> "smsto:" <> number <> ":" <> message
+  }
+}
+
+/// Build a geographic location payload, e.g. `geo:59.3293,18.0686`
+/// Scanning the resulting QR code opens the location in the maps app
+pub fn geo(latitude latitude: Float, longitude longitude: Float) -> String {
+  "geo:" <> float.to_string(latitude) <> "," <> float.to_string(longitude)
+}
+
+// Escape the special characters of the WIFI format: \ ; , " :
+fn escape_wifi(value: String) -> String {
+  value
+  |> string.replace("\\", "\\\\")
+  |> string.replace(";", "\\;")
+  |> string.replace(",", "\\,")
+  |> string.replace("\"", "\\\"")
+  |> string.replace(":", "\\:")
+}
+
+// Escape a vCard / iCalendar TEXT value: \ ; , and newlines
+fn escape_text(value: String) -> String {
+  value
+  |> string.replace("\\", "\\\\")
+  |> string.replace(";", "\\;")
+  |> string.replace(",", "\\,")
+  |> string.replace("\r\n", "\\n")
+  |> string.replace("\n", "\\n")
+}
+
+fn optional_line(property: String, value: Option(String)) -> String {
+  case value {
+    Some(value) -> property <> ":" <> escape_text(value) <> "\r\n"
+    None -> ""
   }
 }

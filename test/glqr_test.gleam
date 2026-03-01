@@ -61,6 +61,17 @@ pub fn hello_world_v5_printable_test() {
   |> birdie.snap(title: "HELLO WORLD version 5 printable")
 }
 
+pub fn hello_world_v5_q_printable_test() {
+  let assert Ok(matrix) =
+    glqr.new("HELLO WORLD")
+    |> glqr.error_correction(glqr.Q)
+    |> glqr.min_version(5)
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "HELLO WORLD EC-Q version 5 printable")
+}
+
 pub fn numeric_printable_test() {
   let assert Ok(matrix) = glqr.new("1234567890") |> glqr.generate
   matrix
@@ -135,4 +146,189 @@ pub fn value_exceeds_capacity_error_test() {
     value_length: 3392,
     capacity: 3391,
   ))
+}
+
+pub fn wifi_wpa_test() {
+  glqr.wifi(
+    ssid: "MyNetwork",
+    authentication: glqr.Wpa("hunter2"),
+    hidden: False,
+  )
+  |> should.equal("WIFI:S:MyNetwork;T:WPA;P:hunter2;;")
+}
+
+pub fn wifi_wep_hidden_test() {
+  glqr.wifi(
+    ssid: "MyNetwork",
+    authentication: glqr.Wep("hunter2"),
+    hidden: True,
+  )
+  |> should.equal("WIFI:S:MyNetwork;T:WEP;P:hunter2;H:true;;")
+}
+
+pub fn wifi_open_test() {
+  glqr.wifi(ssid: "Cafe Guest", authentication: glqr.NoPassword, hidden: False)
+  |> should.equal("WIFI:S:Cafe Guest;T:nopass;;")
+}
+
+pub fn wifi_escaping_test() {
+  glqr.wifi(
+    ssid: "Net;work",
+    authentication: glqr.Wpa("pa\\ss:word\"quote,comma"),
+    hidden: False,
+  )
+  |> should.equal(
+    "WIFI:S:Net\\;work;T:WPA;P:pa\\\\ss\\:word\\\"quote\\,comma;;",
+  )
+}
+
+pub fn v_card_minimal_test() {
+  glqr.v_card(name: "Lucy Gleam")
+  |> glqr.v_card_to_string
+  |> should.equal(
+    "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Lucy Gleam\r\nFN:Lucy Gleam\r\nEND:VCARD",
+  )
+}
+
+pub fn v_card_full_test() {
+  glqr.v_card(name: "Lucy Gleam")
+  |> glqr.v_card_organization("Gleam Industries")
+  |> glqr.v_card_job_title("Star")
+  |> glqr.v_card_phone("+461234567")
+  |> glqr.v_card_email("lucy@gleam.run")
+  |> glqr.v_card_address("1 Beam Street, Erlangen")
+  |> glqr.v_card_website("https://gleam.run")
+  |> glqr.v_card_note("Loves type safety")
+  |> glqr.v_card_to_string
+  |> should.equal(
+    "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Lucy Gleam\r\nFN:Lucy Gleam\r\n"
+    <> "ORG:Gleam Industries\r\nTITLE:Star\r\nTEL:+461234567\r\n"
+    <> "EMAIL:lucy@gleam.run\r\nADR:;;1 Beam Street\\, Erlangen;;;;\r\n"
+    <> "URL:https://gleam.run\r\nNOTE:Loves type safety\r\nEND:VCARD",
+  )
+}
+
+pub fn calendar_event_test() {
+  glqr.calendar_event(
+    summary: "Gleam meetup",
+    starts_at: "20260719T093000Z",
+    ends_at: "20260719T103000Z",
+  )
+  |> glqr.calendar_event_location("Stockholm")
+  |> glqr.calendar_event_description("Talks; and fika")
+  |> glqr.calendar_event_to_string
+  |> should.equal(
+    "BEGIN:VEVENT\r\nSUMMARY:Gleam meetup\r\nDTSTART:20260719T093000Z\r\n"
+    <> "DTEND:20260719T103000Z\r\nLOCATION:Stockholm\r\n"
+    <> "DESCRIPTION:Talks\\; and fika\r\nEND:VEVENT",
+  )
+}
+
+pub fn email_test() {
+  glqr.email("hello@example.com")
+  |> should.equal("mailto:hello@example.com")
+}
+
+pub fn phone_test() {
+  glqr.phone("+461234567")
+  |> should.equal("tel:+461234567")
+}
+
+pub fn sms_test() {
+  glqr.sms(number: "+461234567", message: "Hello!")
+  |> should.equal("smsto:+461234567:Hello!")
+}
+
+pub fn sms_no_message_test() {
+  glqr.sms(number: "+461234567", message: "")
+  |> should.equal("smsto:+461234567")
+}
+
+pub fn geo_test() {
+  glqr.geo(latitude: 59.3293, longitude: 18.0686)
+  |> should.equal("geo:59.3293,18.0686")
+}
+
+pub fn wifi_printable_test() {
+  let assert Ok(matrix) =
+    glqr.wifi(
+      ssid: "MyNetwork",
+      authentication: glqr.Wpa("hunter2"),
+      hidden: False,
+    )
+    |> glqr.new
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "WiFi WPA printable")
+}
+
+pub fn v_card_printable_test() {
+  let assert Ok(matrix) =
+    glqr.v_card(name: "Lucy Gleam")
+    |> glqr.v_card_phone("+461234567")
+    |> glqr.v_card_email("lucy@gleam.run")
+    |> glqr.v_card_website("https://gleam.run")
+    |> glqr.v_card_to_string
+    |> glqr.new
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "vCard printable")
+}
+
+pub fn calendar_event_printable_test() {
+  let assert Ok(matrix) =
+    glqr.calendar_event(
+      summary: "Gleam meetup",
+      starts_at: "20260719T093000Z",
+      ends_at: "20260719T103000Z",
+    )
+    |> glqr.calendar_event_location("Stockholm")
+    |> glqr.calendar_event_to_string
+    |> glqr.new
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "calendar event printable")
+}
+
+pub fn email_printable_test() {
+  let assert Ok(matrix) =
+    glqr.email("hello@example.com")
+    |> glqr.new
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "email mailto printable")
+}
+
+pub fn phone_printable_test() {
+  let assert Ok(matrix) =
+    glqr.phone("+461234567")
+    |> glqr.new
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "phone tel printable")
+}
+
+pub fn sms_printable_test() {
+  let assert Ok(matrix) =
+    glqr.sms(number: "+461234567", message: "Hello!")
+    |> glqr.new
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "sms smsto printable")
+}
+
+pub fn geo_printable_test() {
+  let assert Ok(matrix) =
+    glqr.geo(latitude: 59.3293, longitude: 18.0686)
+    |> glqr.new
+    |> glqr.generate
+  matrix
+  |> glqr.to_printable
+  |> birdie.snap(title: "geo location printable")
 }

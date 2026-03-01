@@ -8,7 +8,6 @@ gleam add glqr
 ```
 ## Display QR Code
 ```gleam
-import gleam/io
 import glqr as qr
 
 pub fn main() -> Nil {
@@ -16,11 +15,12 @@ pub fn main() -> Nil {
     qr.new("HELLO WORLD")
     |> qr.generate()
 
-  code
-  |> qr.to_printable()
-  |> io.println() // YOU CANT USE ECHO AS IT PRESERVES THE NEWLINE
+  qr.print(code)
 }
 ```
+
+If you need the string itself use `qr.to_printable()`, but print it with
+`io.println` — `echo` escapes the newlines and mangles the output.
 
 ## Config Options
 
@@ -35,7 +35,6 @@ pub fn main() -> Nil {
     - Version 40: 177x177 matrix
 
 ```gleam
-import gleam/io
 import glqr as qr
 
 pub fn main() -> Nil {
@@ -45,9 +44,7 @@ pub fn main() -> Nil {
     |> qr.min_version(10)
     |> qr.generate()
 
-  code
-  |> qr.to_printable()
-  |> io.println() // YOU CANT USE ECHO AS IT PRESERVES THE NEWLINE
+  qr.print(code)
 }
 ```
 
@@ -101,6 +98,52 @@ pub fn main() {
 }
 ````
 
+## Standard Content Formats
+Builders for common QR code payload formats — WiFi networks, contact cards
+(vCard), calendar events, email, SMS, phone numbers, and geo locations.
+Plain URLs need no helper, pass them directly to `glqr.new`.
+
+```gleam
+import glqr as qr
+
+pub fn main() -> Nil {
+  // Join a WiFi network
+  let wifi =
+    qr.wifi(
+      ssid: "MyNetwork",
+      authentication: qr.Wpa("hunter2"),
+      hidden: False,
+    )
+
+  // Share contact info
+  let card =
+    qr.v_card(name: "Lucy Gleam")
+    |> qr.v_card_phone("+461234567")
+    |> qr.v_card_email("lucy@gleam.run")
+    |> qr.v_card_website("https://gleam.run")
+    |> qr.v_card_to_string
+
+  // Other formats
+  let _event =
+    qr.calendar_event(
+      summary: "Gleam meetup",
+      starts_at: "20260719T093000Z",
+      ends_at: "20260719T103000Z",
+    )
+    |> qr.calendar_event_to_string
+  let _email = qr.email("hello@example.com")
+  let _sms = qr.sms(number: "+461234567", message: "Hello!")
+  let _phone = qr.phone("+461234567")
+  let _geo = qr.geo(latitude: 59.3293, longitude: 18.0686)
+
+  let assert Ok(code) = qr.new(wifi) |> qr.generate()
+  qr.print(code)
+
+  let assert Ok(code) = qr.new(card) |> qr.generate()
+  qr.print(code)
+}
+```
+
 Further documentation can be found at <https://hexdocs.pm/glqr>.
 
 ## Development
@@ -108,6 +151,26 @@ Further documentation can be found at <https://hexdocs.pm/glqr>.
 ```sh
 gleam run   # Run the project
 gleam test  # Run the tests
+```
+
+### Benchmark
+
+A small benchmark of `glqr.generate` lives in `dev/bench.gleam`, powered by
+[gleamy_bench](https://hex.pm/packages/gleamy_bench). It works on both targets:
+
+```sh
+gleam run -m bench                      # Erlang target
+gleam run -m bench --target javascript
+```
+
+Sample output on an Apple M4 machine (Erlang target). IPS is QR codes
+generated per second, Min/P99 are milliseconds per QR code:
+
+```
+Input               Function                       IPS           Min           P99
+v1 (11 chars)       glqr.generate            3669.1609        0.2379        0.3329
+v10 (500 chars)     glqr.generate             231.1611        3.7884        4.8095
+v40 (4200 chars)    glqr.generate              37.5127       25.5247       27.5804
 ```
 
 ## TODO
@@ -127,10 +190,19 @@ gleam test  # Run the tests
 - [x] QR Code Structure
 - [x] Draw Matrix
 - [x] Add Snapshot Testing
-- [ ] Add more Snapshot testing
+- [x] Add more Snapshot testing
 - [x] Add Lustre example
-- [x] Use matrix with custom QrCode type with bitarray instead of list of lists
+- [x] Add opaque Qr type with `to_bits` BitArray view
 - [x] Add to_bits feature
+- [x] Add convenience functions
+    - [x] Contact Info (vCard)
+    - [x] WiFi Network
+    - [x] Url (no helper needed, pass URLs directly to `glqr.new`)
+    - [x] Email
+    - [x] Calendar Event
+    - [x] SMS
+    - [x] Phone Number
+    - [x] GeoLocation
 
 ## References
 [Thonky's QR Code Tutorial](https://www.thonky.com/qr-code-tutorial)
