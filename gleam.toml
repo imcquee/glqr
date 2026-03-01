@@ -1,5 +1,5 @@
 name = "glqr"
-version = "1.0.0"
+version = "1.1.0"
 
 description = "Simple Gleam library for generating QR codes."
 licences = ["Apache-2.0"]
