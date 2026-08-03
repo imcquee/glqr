@@ -20,7 +20,7 @@ pub fn main() -> Nil {
 ```
 
 If you need the string itself use `qr.to_printable()`, but print it with
-`io.println` — `echo` escapes the newlines and mangles the output.
+`io.println` because `echo` escapes the newlines and mangles the output.
 
 ## Config Options
 
@@ -179,7 +179,6 @@ v40 (4200 chars)    glqr.generate              37.5127       25.5247       27.58
     - [x] Numeric
     - [x] Alphanumeric
     - [x] Byte
-    - [ ] Kanji
 - [x] Data Encoding
     - [x] Mode Indicator
     - [x] Character Count Indicator
